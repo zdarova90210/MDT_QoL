@@ -1,0 +1,11 @@
+.idea/
+.vscode/
+
+# Build artifacts
+release/
+_staging/
+*.zip
+
+# OS
+Thumbs.db
+.DS_Store

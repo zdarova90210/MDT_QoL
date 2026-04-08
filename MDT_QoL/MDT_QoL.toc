@@ -1,0 +1,7 @@
+## Interface: 120001
+## Title: MDT QoL
+## Notes: QoL improvements for Mythic Dungeon Tools
+## Author: zdarova90210
+## Version: 0.1.0
+
+MDT_QoL.lua
