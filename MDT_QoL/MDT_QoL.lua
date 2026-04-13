@@ -23,6 +23,8 @@ local state = {
   elapsed = 0,
   labelsByPull = {},
   enemyInfoHooked = false,
+  rightButtonDown = false,
+  suppressEnemyInfoCloseUntilRightButtonRelease = false,
 }
 
 local function applyPercentFont(fontString)
@@ -35,6 +37,47 @@ end
 
 local function shouldOpenEnemyInfo(button)
   return IsControlKeyDown() and button == ENEMY_INFO_MOUSE_BUTTON
+end
+
+local function shouldCloseEnemyInfo(buttonDown, wasButtonDown)
+  if not (IsControlKeyDown() and buttonDown and not wasButtonDown) then
+    return false
+  end
+
+  local mdt = _G.MDT
+  local enemyInfoFrame = mdt and mdt.EnemyInfoFrame
+  local enemyInfoWidgetFrame = enemyInfoFrame and enemyInfoFrame.frame
+  if not (enemyInfoWidgetFrame and enemyInfoWidgetFrame:IsShown()) then
+    return false
+  end
+
+  return MouseIsOver(enemyInfoWidgetFrame)
+end
+
+local function handleEnemyInfoCloseHotkey()
+  if type(IsMouseButtonDown) ~= "function" then
+    return
+  end
+
+  local buttonDown = IsMouseButtonDown(ENEMY_INFO_MOUSE_BUTTON)
+  local wasButtonDown = state.rightButtonDown
+  state.rightButtonDown = buttonDown
+
+  if state.suppressEnemyInfoCloseUntilRightButtonRelease then
+    if not buttonDown then
+      state.suppressEnemyInfoCloseUntilRightButtonRelease = false
+    end
+    return
+  end
+
+  if not shouldCloseEnemyInfo(buttonDown, wasButtonDown) then
+    return
+  end
+
+  local enemyInfoFrame = _G.MDT and _G.MDT.EnemyInfoFrame
+  if enemyInfoFrame and type(enemyInfoFrame.Hide) == "function" then
+    enemyInfoFrame:Hide()
+  end
 end
 
 local function installEnemyInfoHook()
@@ -53,6 +96,7 @@ local function installEnemyInfoHook()
     if mdt and shouldOpenEnemyInfo(button) then
       local db = mdt.GetDB and mdt:GetDB()
       if not (db and db.devMode) and type(mdt.ShowEnemyInfoFrame) == "function" then
+        state.suppressEnemyInfoCloseUntilRightButtonRelease = true
         mdt:ShowEnemyInfoFrame(self)
         return
       end
@@ -193,6 +237,8 @@ local function onUpdate(_, elapsed)
   if not state.enabled then
     return
   end
+
+  handleEnemyInfoCloseHotkey()
 
   state.elapsed = state.elapsed + elapsed
   if state.elapsed < UPDATE_INTERVAL_SECONDS then
