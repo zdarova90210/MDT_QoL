@@ -2,13 +2,13 @@
 
 ## 0.2.0 - 2026-04-13
 
-- Добавлено закрытие окна `Enemy Info` по `Ctrl + Right Click` в любой точке этого окна.
-- Добавлена защита от мгновенного закрытия на том же клике, которым `Enemy Info` открывается.
+- Added support for closing the `Enemy Info` window with `Ctrl + Right Click` anywhere inside the window.
+- Added protection against immediate closing on the same click that opens `Enemy Info`.
 
 ## 0.1.0 - 2026-04-08
 
-- Первый публичный релиз `MDT_QoL`.
-- Добавлен overlay процентов пулов на карте при зажатом `Ctrl`.
-- Добавлен контрастный фон под проценты (полупрозрачный черный, padding 4px).
-- Добавлен быстрый доступ к `Enemy Info`: `Ctrl + Right Click` по мобу.
-- Добавлена fallback-логика шрифтов, включая попытку использовать `PTSansNarrow`.
+- First public release of `MDT_QoL`.
+- Added a pull percentage overlay on the map when `Ctrl` is held.
+- Added a high-contrast background for percentages (semi-transparent black, 4px padding).
+- Added quick access to `Enemy Info`: `Ctrl + Right Click` on an enemy.
+- Added fallback font logic, including an attempt to use `PTSansNarrow`.
