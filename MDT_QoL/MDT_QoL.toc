@@ -2,6 +2,6 @@
 ## Title: MDT QoL
 ## Notes: QoL improvements for Mythic Dungeon Tools
 ## Author: zdarova90210
-## Version: 0.1.0
+## Version: 0.2.0
 
 MDT_QoL.lua
