@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0 - 2026-04-13
+
+- Refined the `Ctrl` pull percentage labels: increased horizontal padding, added rounded pill-style background corners, and nudged labels a few pixels lower from their anchor.
+
 ## 0.2.0 - 2026-04-13
 
 - Added support for closing the `Enemy Info` window with `Ctrl + Right Click` anywhere inside the window.

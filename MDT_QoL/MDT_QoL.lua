@@ -7,6 +7,12 @@ local UPDATE_INTERVAL_SECONDS = 0.1
 local FONT_SIZE = 16
 local HOOK_RETRY_DELAY_SECONDS = 0.25
 local HOOK_RETRY_MAX_ATTEMPTS = 40
+local LABEL_HORIZONTAL_PADDING = 7
+local LABEL_VERTICAL_PADDING = 4
+local LABEL_ROUNDED_CAP_WIDTH = math.floor((FONT_SIZE + (2 * LABEL_VERTICAL_PADDING)) / 2)
+local LABEL_Y_OFFSET = -4
+local LABEL_BACKGROUND_ALPHA = 0.55
+local ROUNDED_CAP_TEXTURE = "Interface\\AddOns\\MythicDungeonTools\\Textures\\Circle_White"
 
 local ENEMY_INFO_MOUSE_BUTTON = "RightButton" -- Ctrl + RightClick
 
@@ -124,7 +130,9 @@ end
 local function hideAllLabels()
   for _, entry in pairs(state.labelsByPull) do
     entry.label:Hide()
-    entry.background:Hide()
+    entry.backgroundCenter:Hide()
+    entry.backgroundLeftCap:Hide()
+    entry.backgroundRightCap:Hide()
   end
 end
 
@@ -153,8 +161,18 @@ end
 local function ensureLabel(anchorFrame, pullIdx)
   local entry = state.labelsByPull[pullIdx]
   if not entry then
-    local background = anchorFrame:CreateTexture(nil, "OVERLAY", nil, -1)
-    background:SetColorTexture(0, 0, 0, 0.55)
+    local backgroundCenter = anchorFrame:CreateTexture(nil, "OVERLAY", nil, -1)
+    backgroundCenter:SetColorTexture(0, 0, 0, LABEL_BACKGROUND_ALPHA)
+
+    local backgroundLeftCap = anchorFrame:CreateTexture(nil, "OVERLAY", nil, -1)
+    backgroundLeftCap:SetTexture(ROUNDED_CAP_TEXTURE)
+    backgroundLeftCap:SetVertexColor(0, 0, 0, LABEL_BACKGROUND_ALPHA)
+    backgroundLeftCap:SetTexCoord(0, 0.5, 0, 1)
+
+    local backgroundRightCap = anchorFrame:CreateTexture(nil, "OVERLAY", nil, -1)
+    backgroundRightCap:SetTexture(ROUNDED_CAP_TEXTURE)
+    backgroundRightCap:SetVertexColor(0, 0, 0, LABEL_BACKGROUND_ALPHA)
+    backgroundRightCap:SetTexCoord(0.5, 1, 0, 1)
 
     local label = anchorFrame:CreateFontString(nil, "OVERLAY", nil)
     applyPercentFont(label)
@@ -164,23 +182,33 @@ local function ensureLabel(anchorFrame, pullIdx)
     label:SetJustifyH("CENTER")
     label:SetJustifyV("MIDDLE")
 
-    background:SetPoint("TOPLEFT", label, "TOPLEFT", -4, 4)
-    background:SetPoint("BOTTOMRIGHT", label, "BOTTOMRIGHT", 4, -4)
+    backgroundCenter:SetPoint("TOPLEFT", label, "TOPLEFT", -LABEL_HORIZONTAL_PADDING + LABEL_ROUNDED_CAP_WIDTH,
+      LABEL_VERTICAL_PADDING)
+    backgroundCenter:SetPoint("BOTTOMRIGHT", label, "BOTTOMRIGHT", LABEL_HORIZONTAL_PADDING - LABEL_ROUNDED_CAP_WIDTH,
+      -LABEL_VERTICAL_PADDING)
+    backgroundLeftCap:SetPoint("TOPLEFT", label, "TOPLEFT", -LABEL_HORIZONTAL_PADDING, LABEL_VERTICAL_PADDING)
+    backgroundLeftCap:SetPoint("BOTTOMRIGHT", backgroundCenter, "BOTTOMLEFT", 0, 0)
+    backgroundRightCap:SetPoint("TOPLEFT", backgroundCenter, "TOPRIGHT", 0, 0)
+    backgroundRightCap:SetPoint("BOTTOMRIGHT", label, "BOTTOMRIGHT", LABEL_HORIZONTAL_PADDING, -LABEL_VERTICAL_PADDING)
 
     entry = {
       label = label,
-      background = background,
+      backgroundCenter = backgroundCenter,
+      backgroundLeftCap = backgroundLeftCap,
+      backgroundRightCap = backgroundRightCap,
     }
     state.labelsByPull[pullIdx] = entry
   end
 
   if entry.label:GetParent() ~= anchorFrame then
     entry.label:SetParent(anchorFrame)
-    entry.background:SetParent(anchorFrame)
+    entry.backgroundCenter:SetParent(anchorFrame)
+    entry.backgroundLeftCap:SetParent(anchorFrame)
+    entry.backgroundRightCap:SetParent(anchorFrame)
   end
 
   entry.label:ClearAllPoints()
-  entry.label:SetPoint("TOP", anchorFrame.fs or anchorFrame, "BOTTOM", 0, -1)
+  entry.label:SetPoint("TOP", anchorFrame.fs or anchorFrame, "BOTTOM", 0, LABEL_Y_OFFSET)
   return entry
 end
 
@@ -218,7 +246,9 @@ local function refreshOverlay()
       if text then
         local entry = ensureLabel(child, pullIdx)
         entry.label:SetText(text)
-        entry.background:Show()
+        entry.backgroundCenter:Show()
+        entry.backgroundLeftCap:Show()
+        entry.backgroundRightCap:Show()
         entry.label:Show()
         seen[pullIdx] = true
       end
@@ -228,7 +258,9 @@ local function refreshOverlay()
   for pullIdx, entry in pairs(state.labelsByPull) do
     if not seen[pullIdx] then
       entry.label:Hide()
-      entry.background:Hide()
+      entry.backgroundCenter:Hide()
+      entry.backgroundLeftCap:Hide()
+      entry.backgroundRightCap:Hide()
     end
   end
 end
