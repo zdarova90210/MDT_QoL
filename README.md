@@ -6,10 +6,9 @@ Quality-of-life addon for WoW Retail that extends a popular dungeon route planne
 
 - Hold `Ctrl` to show pull percentages directly on the map, without hunting for pulls in the sidebar.
 - Quickly see how much % each pack gives while planning or running the dungeon.
-- Percentage labels are high-contrast: white text on a semi-transparent dark background.
+- Use the `top-panel spell search` box to find a spell by name or ID and immediately see which enemy casts it.
 - Press `Ctrl + Right Click` on an enemy to open `Enemy Info` instantly (without the context menu).
 - Press `Ctrl + Right Click` anywhere inside `Enemy Info` to close it quickly.
-- Built-in protection prevents accidental instant closing on the same click that opened `Enemy Info`.
 
 ## Repository layout
 

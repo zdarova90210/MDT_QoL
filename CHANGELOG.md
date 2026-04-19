@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0 - 2026-04-19
+
+- Added a spell search bar in the MDT top panel (`Search spell name or ID`).
+- Search results now instantly show which enemy casts a spell in the current dungeon.
+- Clicking a search result opens `Enemy Info` for that enemy.
+- Implemented lightweight per-dungeon spell indexing with caching to keep the addon responsive.
+
 ## 0.3.0 - 2026-04-13
 
 - Refined the `Ctrl` pull percentage labels: increased horizontal padding, added rounded pill-style background corners, and nudged labels a few pixels lower from their anchor.

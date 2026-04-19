@@ -13,6 +13,15 @@ local LABEL_ROUNDED_CAP_WIDTH = math.floor((FONT_SIZE + (2 * LABEL_VERTICAL_PADD
 local LABEL_Y_OFFSET = -4
 local LABEL_BACKGROUND_ALPHA = 0.55
 local ROUNDED_CAP_TEXTURE = "Interface\\AddOns\\MythicDungeonTools\\Textures\\Circle_White"
+local SEARCH_BOX_WIDTH = 320
+local SEARCH_BOX_HEIGHT = 20
+local SEARCH_RESULT_ROW_HEIGHT = 18
+local SEARCH_RESULT_MAX_ROWS = 8
+local SEARCH_RIGHT_OFFSET = -70
+local SEARCH_PLACEHOLDER_TEXT = "Search spell name or ID"
+local SEARCH_CLICK_HINT_TEXT = "Click result to open Enemy Info"
+local SEARCH_TITLE_TEXT = "Spell Search"
+local SEARCH_NO_RESULTS_TEXT = "No matches"
 
 local ENEMY_INFO_MOUSE_BUTTON = "RightButton" -- Ctrl + RightClick
 
@@ -31,6 +40,11 @@ local state = {
   enemyInfoHooked = false,
   rightButtonDown = false,
   suppressEnemyInfoCloseUntilRightButtonRelease = false,
+  spellSearchUI = nil,
+  spellSearchRows = {},
+  spellSearchResultEntries = nil,
+  spellSearchIndexByDungeon = {},
+  spellSearchLastDungeonIdx = nil,
 }
 
 local function applyPercentFont(fontString)
@@ -39,6 +53,343 @@ local function applyPercentFont(fontString)
       return
     end
   end
+end
+
+local function trimText(value)
+  if type(value) ~= "string" then
+    return ""
+  end
+  return (value:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function normalizeText(value)
+  return string.lower(trimText(value))
+end
+
+local function getLocalizedEnemyName(mdt, enemyData)
+  if not enemyData then
+    return "Unknown enemy"
+  end
+  local enemyName = enemyData.name
+  if mdt and mdt.L and enemyName and mdt.L[enemyName] then
+    return mdt.L[enemyName]
+  end
+  return enemyName or "Unknown enemy"
+end
+
+local function getSpellNameById(spellId)
+  if C_Spell and type(C_Spell.GetSpellName) == "function" then
+    local name = C_Spell.GetSpellName(spellId)
+    if name and name ~= "" then
+      return name
+    end
+  end
+  if type(GetSpellInfo) == "function" then
+    local name = GetSpellInfo(spellId)
+    if name and name ~= "" then
+      return name
+    end
+  end
+  return string.format("Spell #%d", spellId)
+end
+
+local function getSpellSearchDungeonIdx(mdt)
+  local db = mdt and mdt.GetDB and mdt:GetDB()
+  return db and db.currentDungeonIdx or nil
+end
+
+local function buildSpellSearchIndexForDungeon(mdt, dungeonIdx)
+  if not mdt or not dungeonIdx then
+    return {}
+  end
+
+  local enemies = mdt.dungeonEnemies and mdt.dungeonEnemies[dungeonIdx]
+  if type(enemies) ~= "table" then
+    return {}
+  end
+
+  local entries = {}
+  local seen = {}
+
+  local function addSpells(enemyIdx, enemyData, spellsTable, sourceLabel)
+    if type(spellsTable) ~= "table" then
+      return
+    end
+
+    for spellId in pairs(spellsTable) do
+      local numericSpellId = tonumber(spellId)
+      local numericEnemyIdx = tonumber(enemyIdx)
+      if numericSpellId and numericEnemyIdx then
+        local uniqueKey = tostring(numericEnemyIdx) .. ":" .. tostring(numericSpellId)
+        if not seen[uniqueKey] then
+          local spellName = getSpellNameById(numericSpellId)
+          local enemyName = getLocalizedEnemyName(mdt, enemyData)
+          entries[#entries + 1] = {
+            spellId = numericSpellId,
+            spellName = spellName,
+            spellNameNormalized = normalizeText(spellName),
+            enemyIdx = numericEnemyIdx,
+            enemyName = enemyName,
+            enemyNameNormalized = normalizeText(enemyName),
+            sourceLabel = sourceLabel,
+          }
+          seen[uniqueKey] = true
+        end
+      end
+    end
+  end
+
+  for enemyIdx, enemyData in pairs(enemies) do
+    addSpells(enemyIdx, enemyData, enemyData and enemyData.spells, "spell")
+    addSpells(enemyIdx, enemyData, enemyData and enemyData.powers, "power")
+  end
+
+  table.sort(entries, function(left, right)
+    if left.spellNameNormalized ~= right.spellNameNormalized then
+      return left.spellNameNormalized < right.spellNameNormalized
+    end
+    if left.enemyNameNormalized ~= right.enemyNameNormalized then
+      return left.enemyNameNormalized < right.enemyNameNormalized
+    end
+    if left.spellId ~= right.spellId then
+      return left.spellId < right.spellId
+    end
+    return left.enemyIdx < right.enemyIdx
+  end)
+
+  return entries
+end
+
+local function getSpellSearchIndex(mdt)
+  local dungeonIdx = getSpellSearchDungeonIdx(mdt)
+  if not dungeonIdx then
+    return nil
+  end
+
+  local index = state.spellSearchIndexByDungeon[dungeonIdx]
+  if index then
+    return index
+  end
+
+  index = buildSpellSearchIndexForDungeon(mdt, dungeonIdx)
+  state.spellSearchIndexByDungeon[dungeonIdx] = index
+  return index
+end
+
+local function clearSpellSearchRows()
+  for _, row in ipairs(state.spellSearchRows) do
+    row.entry = nil
+    row:Hide()
+  end
+end
+
+local function hideSpellSearchResults()
+  local ui = state.spellSearchUI
+  if not ui then
+    return
+  end
+
+  ui.title:SetText(SEARCH_TITLE_TEXT)
+  clearSpellSearchRows()
+  ui.results:Hide()
+  state.spellSearchResultEntries = nil
+end
+
+local function openEnemyInfoForEnemyIdx(enemyIdx)
+  local mdt = _G.MDT
+  if not mdt or type(mdt.ShowEnemyInfoFrame) ~= "function" then
+    return
+  end
+  mdt:ShowEnemyInfoFrame({ enemyIdx = enemyIdx })
+end
+
+local function updateSpellSearchResults()
+  local ui = state.spellSearchUI
+  if not ui then
+    return
+  end
+
+  local mdt = _G.MDT
+  if not mdt then
+    hideSpellSearchResults()
+    return
+  end
+
+  local query = trimText(ui.editBox:GetText() or "")
+  if query == "" then
+    hideSpellSearchResults()
+    return
+  end
+
+  local searchText = string.lower(query)
+  local queryIsNumber = tonumber(searchText) ~= nil
+  local index = getSpellSearchIndex(mdt) or {}
+  local matches = {}
+
+  for _, entry in ipairs(index) do
+    local nameMatch = entry.spellNameNormalized:find(searchText, 1, true) ~= nil
+    local idMatch = queryIsNumber and tostring(entry.spellId):find(searchText, 1, true) ~= nil
+    if nameMatch or idMatch then
+      matches[#matches + 1] = entry
+    end
+  end
+
+  state.spellSearchResultEntries = matches
+  clearSpellSearchRows()
+
+  if #matches == 0 then
+    ui.title:SetText(SEARCH_NO_RESULTS_TEXT)
+    ui.results:SetHeight(30)
+    ui.results:Show()
+    return
+  end
+
+  local visibleCount = math.min(#matches, SEARCH_RESULT_MAX_ROWS)
+  if #matches > visibleCount then
+    ui.title:SetText(string.format("%s (%d, showing %d)", SEARCH_TITLE_TEXT, #matches, visibleCount))
+  else
+    ui.title:SetText(string.format("%s (%d)", SEARCH_TITLE_TEXT, #matches))
+  end
+
+  for indexRow = 1, visibleCount do
+    local row = state.spellSearchRows[indexRow]
+    local entry = matches[indexRow]
+    local sourcePrefix = entry.sourceLabel == "power" and "[Power] " or ""
+    row.text:SetText(string.format("%s%s (%d) - %s", sourcePrefix, entry.spellName, entry.spellId, entry.enemyName))
+    row.entry = entry
+    row:Show()
+  end
+
+  local resultsHeight = 26 + (visibleCount * SEARCH_RESULT_ROW_HEIGHT)
+  ui.results:SetHeight(resultsHeight)
+  ui.results:Show()
+end
+
+local function refreshSpellSearchForDungeonChange()
+  local ui = state.spellSearchUI
+  local mdt = _G.MDT
+  if not ui or not mdt then
+    return
+  end
+
+  local currentDungeonIdx = getSpellSearchDungeonIdx(mdt)
+  if state.spellSearchLastDungeonIdx == currentDungeonIdx then
+    return
+  end
+  state.spellSearchLastDungeonIdx = currentDungeonIdx
+
+  if trimText(ui.editBox:GetText() or "") ~= "" then
+    updateSpellSearchResults()
+  else
+    hideSpellSearchResults()
+  end
+end
+
+local function installSpellSearchUI()
+  if state.spellSearchUI then
+    return true
+  end
+
+  local mdt = _G.MDT
+  local mainFrame = mdt and mdt.main_frame
+  local topPanel = mainFrame and mainFrame.topPanel
+  if not topPanel then
+    return false
+  end
+
+  local searchContainer = CreateFrame("Frame", nil, topPanel)
+  searchContainer:SetSize(SEARCH_BOX_WIDTH, SEARCH_BOX_HEIGHT + 4)
+  searchContainer:SetPoint("RIGHT", topPanel, "RIGHT", SEARCH_RIGHT_OFFSET, 0)
+  searchContainer:SetFrameStrata("HIGH")
+  searchContainer:SetFrameLevel(topPanel:GetFrameLevel() + 30)
+  local searchBackground = searchContainer:CreateTexture(nil, "BACKGROUND", nil, -1)
+  searchBackground:SetAllPoints()
+  searchBackground:SetColorTexture(0, 0, 0, 0.35)
+
+  local editBox = CreateFrame("EditBox", nil, searchContainer, "InputBoxTemplate")
+  editBox:SetAutoFocus(false)
+  editBox:SetSize(SEARCH_BOX_WIDTH - 18, SEARCH_BOX_HEIGHT)
+  editBox:SetPoint("CENTER", searchContainer, "CENTER", 0, -1)
+  editBox:SetTextInsets(2, 2, 0, 0)
+  editBox:SetScript("OnEscapePressed", function(self)
+    self:SetText("")
+    self:ClearFocus()
+    updateSpellSearchResults()
+  end)
+  editBox:SetScript("OnEnterPressed", function(self)
+    local entries = state.spellSearchResultEntries
+    if entries and entries[1] then
+      openEnemyInfoForEnemyIdx(entries[1].enemyIdx)
+      self:ClearFocus()
+    end
+  end)
+
+  local placeholder = searchContainer:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  placeholder:SetJustifyH("LEFT")
+  placeholder:SetPoint("LEFT", editBox, "LEFT", 6, 0)
+  placeholder:SetText(SEARCH_PLACEHOLDER_TEXT)
+
+  local hintText = searchContainer:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  hintText:SetPoint("TOPRIGHT", searchContainer, "BOTTOMRIGHT", 0, -2)
+  hintText:SetText(SEARCH_CLICK_HINT_TEXT)
+
+  local resultsFrame = CreateFrame("Frame", nil, mainFrame)
+  resultsFrame:SetWidth(SEARCH_BOX_WIDTH)
+  resultsFrame:SetPoint("TOPRIGHT", searchContainer, "BOTTOMRIGHT", 0, -16)
+  resultsFrame:SetFrameStrata("HIGH")
+  resultsFrame:SetFrameLevel(searchContainer:GetFrameLevel() + 1)
+  local resultsBackground = resultsFrame:CreateTexture(nil, "BACKGROUND", nil, -1)
+  resultsBackground:SetAllPoints()
+  resultsBackground:SetColorTexture(0, 0, 0, 0.8)
+  resultsFrame:Hide()
+
+  local title = resultsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  title:SetPoint("TOPLEFT", resultsFrame, "TOPLEFT", 6, -6)
+  title:SetPoint("TOPRIGHT", resultsFrame, "TOPRIGHT", -6, -6)
+  title:SetJustifyH("LEFT")
+  title:SetText(SEARCH_TITLE_TEXT)
+
+  for rowIndex = 1, SEARCH_RESULT_MAX_ROWS do
+    local row = CreateFrame("Button", nil, resultsFrame)
+    row:SetPoint("TOPLEFT", resultsFrame, "TOPLEFT", 6, -8 - (rowIndex * SEARCH_RESULT_ROW_HEIGHT))
+    row:SetPoint("TOPRIGHT", resultsFrame, "TOPRIGHT", -6, -8 - (rowIndex * SEARCH_RESULT_ROW_HEIGHT))
+    row:SetHeight(SEARCH_RESULT_ROW_HEIGHT)
+    row:RegisterForClicks("LeftButtonUp")
+    row:SetScript("OnClick", function(self)
+      if self.entry then
+        openEnemyInfoForEnemyIdx(self.entry.enemyIdx)
+      end
+    end)
+
+    local highlight = row:CreateTexture(nil, "HIGHLIGHT")
+    highlight:SetAllPoints()
+    highlight:SetColorTexture(1, 1, 1, 0.12)
+
+    row.text = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    row.text:SetPoint("LEFT", row, "LEFT", 0, 0)
+    row.text:SetPoint("RIGHT", row, "RIGHT", 0, 0)
+    row.text:SetJustifyH("LEFT")
+    row.text:SetWordWrap(false)
+    row:Hide()
+
+    state.spellSearchRows[rowIndex] = row
+  end
+
+  editBox:SetScript("OnTextChanged", function(self)
+    local currentText = trimText(self:GetText() or "")
+    placeholder:SetShown(currentText == "")
+    updateSpellSearchResults()
+  end)
+
+  state.spellSearchUI = {
+    container = searchContainer,
+    editBox = editBox,
+    placeholder = placeholder,
+    results = resultsFrame,
+    title = title,
+  }
+
+  return true
 end
 
 local function shouldOpenEnemyInfo(button)
@@ -277,6 +628,9 @@ local function onUpdate(_, elapsed)
     return
   end
   state.elapsed = 0
+
+  installSpellSearchUI()
+  refreshSpellSearchForDungeonChange()
   refreshOverlay()
 end
 
