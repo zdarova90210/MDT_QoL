@@ -18,7 +18,7 @@ local SEARCH_BOX_HEIGHT = 20
 local SEARCH_RESULT_ROW_HEIGHT = 18
 local SEARCH_RESULT_MAX_ROWS = 8
 local SEARCH_RIGHT_OFFSET = -70
-local SEARCH_PLACEHOLDER_TEXT = "Search spell name or ID"
+local SEARCH_PLACEHOLDER_TEXT = "Search spell, ID, or enemy"
 local SEARCH_CLICK_HINT_TEXT = "Click result to open Enemy Info"
 local SEARCH_TITLE_TEXT = "Spell Search"
 local SEARCH_NO_RESULTS_TEXT = "No matches"
@@ -228,8 +228,9 @@ local function updateSpellSearchResults()
 
   for _, entry in ipairs(index) do
     local nameMatch = entry.spellNameNormalized:find(searchText, 1, true) ~= nil
+    local enemyMatch = entry.enemyNameNormalized:find(searchText, 1, true) ~= nil
     local idMatch = queryIsNumber and tostring(entry.spellId):find(searchText, 1, true) ~= nil
-    if nameMatch or idMatch then
+    if nameMatch or enemyMatch or idMatch then
       matches[#matches + 1] = entry
     end
   end

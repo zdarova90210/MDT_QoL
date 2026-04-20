@@ -1,12 +1,13 @@
 # MDT_QoL
 
-Quality-of-life addon for WoW Retail that extends a popular dungeon route planner addon without modifying its files.
+`MDT_QoL` is a lightweight quality-of-life companion for `Method Dungeon Tools (MDT)` that improves in-run readability and troubleshooting without modifying MDT files.
+It combines map pull percentage overlays, instant spell-to-enemy lookup via top-panel search, and fast `Enemy Info` hotkeys in one addon.
 
 ## Features
 
 - Hold `Ctrl` to show pull percentages directly on the map, without hunting for pulls in the sidebar.
 - Quickly see how much % each pack gives while planning or running the dungeon.
-- Use the `top-panel spell search` box to find a spell by name or ID and immediately see which enemy casts it.
+- Use the `top-panel spell search` box to find spells by spell name/ID or by enemy name and immediately see who casts what.
 - Press `Ctrl + Right Click` on an enemy to open `Enemy Info` instantly (without the context menu).
 - Press `Ctrl + Right Click` anywhere inside `Enemy Info` to close it quickly.
 

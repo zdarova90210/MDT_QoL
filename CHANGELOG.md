@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1 - 2026-04-20
+
+- Extended top-panel spell search to also match enemy names.
+
 ## 0.4.0 - 2026-04-19
 
 - Added a spell search bar in the MDT top panel (`Search spell name or ID`).
