@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2 - 2026-04-22
+
+- Fixed `Ctrl` map pull percentages after WoW patch `12.0.5`.
+- Added safe font fallback handling for clients where legacy font paths fail.
+- Synced overlay percent text with MDT sidebar pull progress and added resilient map anchor fallbacks.
+
 ## 0.4.1 - 2026-04-20
 
 - Extended top-panel spell search to also match enemy names.

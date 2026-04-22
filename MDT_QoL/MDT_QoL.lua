@@ -37,6 +37,7 @@ local state = {
   enabled = false,
   elapsed = 0,
   labelsByPull = {},
+  fallbackAnchorsByPull = {},
   enemyInfoHooked = false,
   rightButtonDown = false,
   suppressEnemyInfoCloseUntilRightButtonRelease = false,
@@ -49,9 +50,16 @@ local state = {
 
 local function applyPercentFont(fontString)
   for _, fontPath in ipairs(FONT_CANDIDATES) do
-    if fontString:SetFont(fontPath, FONT_SIZE, "OUTLINE") then
+    local ok, applied = pcall(fontString.SetFont, fontString, fontPath, FONT_SIZE, "OUTLINE")
+    if ok and applied then
       return
     end
+  end
+
+  -- Fallback for client/font-path changes in new patches.
+  local fallbackFontObject = GameFontNormalSmall or GameFontNormal or SystemFont_Shadow_Med1
+  if fallbackFontObject then
+    pcall(fontString.SetFontObject, fontString, fallbackFontObject)
   end
 end
 
@@ -486,9 +494,54 @@ local function hideAllLabels()
     entry.backgroundLeftCap:Hide()
     entry.backgroundRightCap:Hide()
   end
+  for _, anchor in pairs(state.fallbackAnchorsByPull) do
+    anchor:Hide()
+  end
 end
 
-local function getPullPercentText(mdt, pullIdx)
+local function getSidebarPullProgressTexts(mdt)
+  local result = {}
+
+  local mainFrame = mdt and mdt.main_frame
+  local sidePanel = mainFrame and mainFrame.sidePanel
+  local pullButtons = sidePanel and sidePanel.newPullButtons
+  if type(pullButtons) ~= "table" then
+    return result
+  end
+
+  for rawPullIdx, pullButton in pairs(pullButtons) do
+    local pullIdx = tonumber(rawPullIdx) or tonumber(pullButton and pullButton.index)
+    if pullIdx then
+      if type(pullButton.UpdateCountText) == "function" then
+        pcall(pullButton.UpdateCountText, pullButton)
+      end
+
+      local progressFontString = pullButton.percentageFontString
+      if progressFontString and type(progressFontString.GetText) == "function" then
+        local text = trimText(progressFontString:GetText() or "")
+        if text ~= "" then
+          result[pullIdx] = text
+        end
+      end
+    end
+  end
+
+  return result
+end
+
+local function getPullPercentText(mdt, pullIdx, sidebarProgressByPull)
+  pullIdx = tonumber(pullIdx)
+  if not pullIdx then
+    return nil
+  end
+
+  -- Primary source: exact progress text shown by original MDT pull buttons in the right sidebar.
+  local sidebarText = sidebarProgressByPull and sidebarProgressByPull[pullIdx]
+  if sidebarText then
+    return sidebarText
+  end
+
+  -- Fallback for early-load moments when sidebar widgets are not ready yet.
   local db = mdt.GetDB and mdt:GetDB()
   if not db or not db.currentDungeonIdx then
     return nil
@@ -572,13 +625,193 @@ local function shouldShowOverlay(mdt)
     return false
   end
 
-  local mainFrame = mdt.main_frame
-  local overMDT = MouseIsOver(mainFrame)
-      or (mainFrame.sidePanel and MouseIsOver(mainFrame.sidePanel))
-      or (mainFrame.topPanel and MouseIsOver(mainFrame.topPanel))
-      or (mainFrame.bottomPanel and MouseIsOver(mainFrame.bottomPanel))
+  local mapPanelFrame = mdt.main_frame.mapPanelFrame or _G.MDTMapPanelFrame
+  return mapPanelFrame and mapPanelFrame:IsShown()
+end
 
-  return overMDT and mainFrame.mapPanelFrame and mainFrame.mapPanelFrame:IsShown()
+local function ensureFallbackAnchor(mdt, pullIdx, centerX, centerY)
+  local mainFrame = mdt and mdt.main_frame
+  local mapPanelFrame = (mainFrame and mainFrame.mapPanelFrame) or _G.MDTMapPanelFrame
+  if not mapPanelFrame then
+    return nil
+  end
+
+  local anchor = state.fallbackAnchorsByPull[pullIdx]
+  if not anchor then
+    anchor = CreateFrame("Frame", nil, mapPanelFrame)
+    anchor:SetSize(1, 1)
+    anchor:SetFrameStrata("HIGH")
+    anchor:SetFrameLevel((mapPanelFrame:GetFrameLevel() or 1) + 30)
+    state.fallbackAnchorsByPull[pullIdx] = anchor
+  end
+
+  if anchor:GetParent() ~= mapPanelFrame then
+    anchor:SetParent(mapPanelFrame)
+  end
+
+  anchor:ClearAllPoints()
+  local anchorParent = (mainFrame and mainFrame.mapPanelTile1) or _G.MDTmapPanelTile1 or mapPanelFrame
+  anchor:SetPoint("CENTER", anchorParent, "TOPLEFT", centerX, centerY)
+  anchor:Show()
+  return anchor
+end
+
+local function collectPullCentersFromVisibleBlips(mdt)
+  local centersByPull = {}
+  local getCurrentPreset = mdt and mdt.GetCurrentPreset
+  local preset = getCurrentPreset and mdt:GetCurrentPreset()
+  local pulls = preset and preset.value and preset.value.pulls
+  if type(pulls) ~= "table" then
+    return centersByPull
+  end
+
+  local getDungeonEnemyBlips = mdt and mdt.GetDungeonEnemyBlips
+  local blips = getDungeonEnemyBlips and mdt:GetDungeonEnemyBlips()
+  if type(blips) ~= "table" then
+    return centersByPull
+  end
+
+  local blipByEnemyClone = {}
+  for _, blip in pairs(blips) do
+    local enemyIdx = blip and tonumber(blip.enemyIdx)
+    local cloneIdx = blip and tonumber(blip.cloneIdx)
+    if enemyIdx and cloneIdx then
+      blipByEnemyClone[enemyIdx .. ":" .. cloneIdx] = blip
+    end
+  end
+
+  for rawPullIdx, pull in pairs(pulls) do
+    local pullIdx = tonumber(rawPullIdx)
+    if pullIdx and type(pull) == "table" then
+      local totalX = 0
+      local totalY = 0
+      local count = 0
+
+      for rawEnemyIdx, clones in pairs(pull) do
+        local enemyIdx = tonumber(rawEnemyIdx)
+        if enemyIdx and type(clones) == "table" then
+          for _, rawCloneIdx in pairs(clones) do
+            local cloneIdx = tonumber(rawCloneIdx)
+            if cloneIdx then
+              local included = true
+              if type(mdt.IsCloneIncluded) == "function" then
+                included = mdt:IsCloneIncluded(enemyIdx, cloneIdx)
+              end
+
+              if included then
+                local blip = blipByEnemyClone[enemyIdx .. ":" .. cloneIdx]
+                if blip then
+                  local _, _, _, x, y = blip:GetPoint()
+                  if x and y then
+                    totalX = totalX + x
+                    totalY = totalY + y
+                    count = count + 1
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+
+      if count > 0 then
+        centersByPull[pullIdx] = {
+          x = totalX / count,
+          y = totalY / count,
+        }
+      end
+    end
+  end
+
+  return centersByPull
+end
+
+local function collectPullCentersFromPresetData(mdt)
+  local centersByPull = {}
+  local db = mdt and mdt.GetDB and mdt:GetDB()
+  local currentDungeonIdx = db and db.currentDungeonIdx
+  if not currentDungeonIdx then
+    return centersByPull
+  end
+
+  local dungeonEnemies = mdt.dungeonEnemies and mdt.dungeonEnemies[currentDungeonIdx]
+  if type(dungeonEnemies) ~= "table" then
+    return centersByPull
+  end
+
+  local preset = mdt.GetCurrentPreset and mdt:GetCurrentPreset()
+  local pulls = preset and preset.value and preset.value.pulls
+  if type(pulls) ~= "table" then
+    return centersByPull
+  end
+
+  local currentSubLevel = nil
+  if type(mdt.GetCurrentSubLevel) == "function" then
+    currentSubLevel = tonumber(mdt:GetCurrentSubLevel())
+  end
+
+  for rawPullIdx, pull in pairs(pulls) do
+    local pullIdx = tonumber(rawPullIdx)
+    if pullIdx and type(pull) == "table" then
+      local totalX = 0
+      local totalY = 0
+      local count = 0
+
+      for rawEnemyIdx, clones in pairs(pull) do
+        local enemyIdx = tonumber(rawEnemyIdx)
+        local enemyData = enemyIdx and dungeonEnemies[enemyIdx]
+        local enemyClones = enemyData and enemyData.clones
+        if enemyIdx and type(clones) == "table" and type(enemyClones) == "table" then
+          for _, rawCloneIdx in pairs(clones) do
+            local cloneIdx = tonumber(rawCloneIdx)
+            local cloneData = cloneIdx and enemyClones[cloneIdx]
+            if cloneIdx and cloneData then
+              local included = true
+              if type(mdt.IsCloneIncluded) == "function" then
+                included = mdt:IsCloneIncluded(enemyIdx, cloneIdx)
+              end
+
+              local cloneSubLevel = tonumber(cloneData.sublevel)
+              local onCurrentSubLevel = (not currentSubLevel) or (not cloneSubLevel) or (cloneSubLevel == currentSubLevel)
+              if included and onCurrentSubLevel and cloneData.x and cloneData.y then
+                totalX = totalX + cloneData.x
+                totalY = totalY + cloneData.y
+                count = count + 1
+              end
+            end
+          end
+        end
+      end
+
+      if count > 0 then
+        centersByPull[pullIdx] = {
+          x = totalX / count,
+          y = totalY / count,
+        }
+      end
+    end
+  end
+
+  return centersByPull
+end
+
+local function getCurrentPresetPullIndexes(mdt)
+  local result = {}
+  local preset = mdt and mdt.GetCurrentPreset and mdt:GetCurrentPreset()
+  local pulls = preset and preset.value and preset.value.pulls
+  if type(pulls) ~= "table" then
+    return result
+  end
+
+  for rawPullIdx in pairs(pulls) do
+    local pullIdx = tonumber(rawPullIdx)
+    if pullIdx then
+      result[#result + 1] = pullIdx
+    end
+  end
+
+  table.sort(result)
+  return result
 end
 
 local function refreshOverlay()
@@ -588,15 +821,59 @@ local function refreshOverlay()
     return
   end
 
-  local mapPanelFrame = mdt.main_frame.mapPanelFrame
+  local mainFrame = mdt.main_frame
+  local mapPanelFrame = (mainFrame and mainFrame.mapPanelFrame) or _G.MDTMapPanelFrame
+  if not mapPanelFrame then
+    hideAllLabels()
+    return
+  end
+
+  local sidebarProgressByPull = getSidebarPullProgressTexts(mdt)
+  local directAnchorsByPull = {}
   local seen = {}
+  local pullCentersByPull = nil
+  local presetDataCentersByPull = nil
 
   for _, child in ipairs({ mapPanelFrame:GetChildren() }) do
-    local pullIdx = child.pullIdx
-    if type(pullIdx) == "number" and child:IsShown() and child.fs and child.clickArea then
-      local text = getPullPercentText(mdt, pullIdx)
+    local pullIdx = tonumber(child.pullIdx)
+    if pullIdx and child:IsShown() and child.fs then
+      directAnchorsByPull[pullIdx] = child
+    end
+  end
+
+  for pullIdx, text in pairs(sidebarProgressByPull) do
+    local anchor = directAnchorsByPull[pullIdx]
+    if not anchor then
+      pullCentersByPull = pullCentersByPull or collectPullCentersFromVisibleBlips(mdt)
+      presetDataCentersByPull = presetDataCentersByPull or collectPullCentersFromPresetData(mdt)
+      for idx, center in pairs(presetDataCentersByPull) do
+        if not pullCentersByPull[idx] then
+          pullCentersByPull[idx] = center
+        end
+      end
+      local center = pullCentersByPull[pullIdx]
+      if center then
+        anchor = ensureFallbackAnchor(mdt, pullIdx, center.x, center.y)
+      end
+    end
+
+    if anchor then
+      local entry = ensureLabel(anchor, pullIdx)
+      entry.label:SetText(text)
+      entry.backgroundCenter:Show()
+      entry.backgroundLeftCap:Show()
+      entry.backgroundRightCap:Show()
+      entry.label:Show()
+      seen[pullIdx] = true
+    end
+  end
+
+  -- Fallback path for early-load moments when right sidebar widgets are not ready yet.
+  if not next(seen) then
+    for pullIdx, anchor in pairs(directAnchorsByPull) do
+      local text = getPullPercentText(mdt, pullIdx, sidebarProgressByPull)
       if text then
-        local entry = ensureLabel(child, pullIdx)
+        local entry = ensureLabel(anchor, pullIdx)
         entry.label:SetText(text)
         entry.backgroundCenter:Show()
         entry.backgroundLeftCap:Show()
@@ -607,12 +884,48 @@ local function refreshOverlay()
     end
   end
 
+  -- Last-resort fallback: render by preset pulls + blip centers even when direct pull label anchors are unavailable.
+  if not next(seen) then
+    pullCentersByPull = pullCentersByPull or collectPullCentersFromVisibleBlips(mdt)
+    presetDataCentersByPull = presetDataCentersByPull or collectPullCentersFromPresetData(mdt)
+    for idx, center in pairs(presetDataCentersByPull) do
+      if not pullCentersByPull[idx] then
+        pullCentersByPull[idx] = center
+      end
+    end
+    local presetPullIndexes = getCurrentPresetPullIndexes(mdt)
+    for _, pullIdx in ipairs(presetPullIndexes) do
+      local center = pullCentersByPull[pullIdx]
+      if center then
+        local text = getPullPercentText(mdt, pullIdx, sidebarProgressByPull)
+        if text then
+          local anchor = ensureFallbackAnchor(mdt, pullIdx, center.x, center.y)
+          if anchor then
+            local entry = ensureLabel(anchor, pullIdx)
+            entry.label:SetText(text)
+            entry.backgroundCenter:Show()
+            entry.backgroundLeftCap:Show()
+            entry.backgroundRightCap:Show()
+            entry.label:Show()
+            seen[pullIdx] = true
+          end
+        end
+      end
+    end
+  end
+
   for pullIdx, entry in pairs(state.labelsByPull) do
     if not seen[pullIdx] then
       entry.label:Hide()
       entry.backgroundCenter:Hide()
       entry.backgroundLeftCap:Hide()
       entry.backgroundRightCap:Hide()
+    end
+  end
+
+  for pullIdx, anchor in pairs(state.fallbackAnchorsByPull) do
+    if not seen[pullIdx] then
+      anchor:Hide()
     end
   end
 end
