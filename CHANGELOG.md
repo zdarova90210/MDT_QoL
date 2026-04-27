@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.3 - 2026-04-27
+
+- Reduced map pull percentage label footprint to avoid overlap in tightly packed pulls.
+- Decreased percent font size and slightly reduced label padding while preserving readability and visual style.
+
 ## 0.4.2 - 2026-04-22
 
 - Fixed `Ctrl` map pull percentages after WoW patch `12.0.5`.
