@@ -5,8 +5,6 @@ frame:RegisterEvent("ADDON_LOADED")
 
 local UPDATE_INTERVAL_SECONDS = 0.1
 local FONT_SIZE = 12
-local HOOK_RETRY_DELAY_SECONDS = 0.25
-local HOOK_RETRY_MAX_ATTEMPTS = 40
 local LABEL_HORIZONTAL_PADDING = 5
 local LABEL_VERTICAL_PADDING = 3
 local LABEL_ROUNDED_CAP_WIDTH = math.floor((FONT_SIZE + (2 * LABEL_VERTICAL_PADDING)) / 2)
@@ -25,6 +23,16 @@ local SEARCH_NO_RESULTS_TEXT = "No matches"
 
 local ENEMY_INFO_MOUSE_BUTTON = "RightButton" -- Ctrl + RightClick
 
+-- Native action labels verified against MDT 6.2.15 Locales/*.lua.
+local ENEMY_INFO_MENU_LABELS = {
+  enUS = "Open Enemy Info", enGB = "Open Enemy Info",
+  ruRU = "Открыть информацию о враге", deDE = "Gegnerinfo öffnen",
+  frFR = "Informations sur l'ennemi ouvert", itIT = "Apri le informazioni sul nemico",
+  esES = "Abrir información del enemigo", esMX = "Abrir información del enemigo",
+  ptBR = "Abrir informações do inimigo", koKR = "몹 정보 열기",
+  zhCN = "查看怪物信息", zhTW = "開啟敵方資訊",
+}
+
 local FONT_CANDIDATES = {
   "Interface\\AddOns\\MDT_QoL\\Fonts\\PTSansNarrow.ttf",
   "Interface\\AddOns\\MDT_QoL\\Fonts\\PTSansNarrow-Regular.ttf",
@@ -39,14 +47,119 @@ local state = {
   labelsByPull = {},
   fallbackAnchorsByPull = {},
   enemyInfoHooked = false,
-  rightButtonDown = false,
-  suppressEnemyInfoCloseUntilRightButtonRelease = false,
   spellSearchUI = nil,
   spellSearchRows = {},
   spellSearchResultEntries = nil,
   spellSearchIndexByDungeon = {},
   spellSearchLastDungeonIdx = nil,
+  mdt = nil,
+  connection = "waiting",
+  debug = false,
+  hookedEnemyButtons = setmetatable({}, { __mode = "k" }),
+  pendingSpells = {},
+  spellSearchDirty = false,
+  spellSearchSources = {},
+  visibleEnemyData = {},
+  visibleBlips = {},
+  visibleDungeonIdx = nil,
+  visibleSublevel = nil,
+  menuHooked = false,
+  menuRequest = nil,
+  originalEnemyClicks = setmetatable({}, { __mode = "k" }),
+  enemyInfoWidget = nil,
+  lastEnemyInfoAction = "not used",
+  suppressEnemyClickUntil = 0,
+  closingEnemyInfoClick = false,
 }
+
+local function report(message)
+  print("|cff33ff99MDT QoL:|r " .. message)
+end
+
+local function getMDT()
+  return state.mdt or _G.MDT
+end
+
+-- MDT 6.2 keeps full dungeon data private. Read only data already attached to
+-- its visible map pins; never modify MDT's files or access its private table.
+local mapAdapter = { visibleMapOnly = true, dungeonEnemies = {} }
+function mapAdapter:GetDB()
+  local api = _G.MythicDungeonToolsAPI
+  return api and api.GetDB and api:GetDB()
+end
+function mapAdapter:GetCurrentPreset()
+  local db = self:GetDB()
+  local idx = db and db.currentDungeonIdx
+  local presets = db and db.presets and db.presets[idx]
+  local selected = db and db.currentPreset and db.currentPreset[idx]
+  return presets and presets[selected]
+end
+function mapAdapter:GetCurrentSubLevel()
+  local preset = self:GetCurrentPreset()
+  return preset and preset.value and preset.value.currentSublevel
+end
+function mapAdapter:GetDungeonEnemyBlips()
+  return state.visibleBlips
+end
+function mapAdapter:IsMapSectionActive()
+  local db = self:GetDB()
+  return not db or not db.currentSection or db.currentSection == "maps"
+end
+
+local function resolveMDT()
+  if type(_G.MDT) == "table" and type(_G.MDT.ShowEnemyInfoFrame) == "function" then
+    state.mdt = _G.MDT
+    state.connection = "legacy global"
+    return
+  end
+  if _G.MythicDungeonToolsAPI then
+    mapAdapter.main_frame = _G.MDTFrame
+    state.mdt = mapAdapter
+    state.connection = "public API + map"
+    return
+  end
+  state.connection = "waiting for MDT"
+end
+
+local function refreshVisibleMapData()
+  if getMDT() ~= mapAdapter then return end
+  mapAdapter.main_frame = _G.MDTFrame
+  local mainFrame = mapAdapter.main_frame
+  local map = mainFrame and mainFrame.mapPanelFrame
+  if not map or not mainFrame:IsShown() or not mapAdapter:IsMapSectionActive() then return end
+  local db = mapAdapter:GetDB()
+  local dungeonIdx = db and db.currentDungeonIdx
+  if not dungeonIdx then return end
+  local sublevel = mapAdapter:GetCurrentSubLevel()
+  local enemies, blips = {}, {}
+  local changed = state.visibleDungeonIdx ~= dungeonIdx or state.visibleSublevel ~= sublevel
+  for _, child in ipairs({ map:GetChildren() }) do
+    if child:IsShown() and type(child.enemyIdx) == "number" and type(child.cloneIdx) == "number"
+      and type(child.data) == "table" and type(child.clone) == "table"
+      and (not sublevel or not child.clone.sublevel or child.clone.sublevel == sublevel) then
+      enemies[child.enemyIdx] = child.data
+      blips[#blips + 1] = child
+      if state.visibleEnemyData[child.enemyIdx] ~= child.data then changed = true end
+    end
+  end
+  for idx in pairs(state.visibleEnemyData) do
+    if not enemies[idx] then changed = true end
+  end
+  state.visibleBlips = blips
+  if changed then
+    mapAdapter.dungeonEnemies = { [dungeonIdx] = enemies }
+    state.visibleEnemyData = enemies
+    state.visibleDungeonIdx = dungeonIdx
+    state.visibleSublevel = sublevel
+    state.spellSearchIndexByDungeon = {}
+    state.spellSearchSources = {}
+    state.spellSearchDirty = true
+    if state.debug then
+      report(string.format("Map refreshed: dungeon %s, floor %s, %d enemy pins.",
+        tostring(dungeonIdx), tostring(sublevel), #blips))
+    end
+  end
+end
 
 local function applyPercentFont(fontString)
   for _, fontPath in ipairs(FONT_CANDIDATES) do
@@ -70,8 +183,20 @@ local function trimText(value)
   return (value:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+-- Explicit UTF-8 case folding for the cased alphabets used by WoW locales.
+-- CJK characters pass unchanged. No client-dependent byte case conversion.
+local lowercaseCharacters = {}
+do
+  local upper = "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞŸŒẞ"
+  local lower = "абвгдеёжзийклмнопрстуфхцчшщъыьэюяàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿœß"
+  local nextLower = lower:gmatch("[%z\1-\127\194-\244][\128-\191]*")
+  for character in upper:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+    lowercaseCharacters[character] = nextLower()
+  end
+end
 local function normalizeText(value)
-  return string.lower(trimText(value))
+  local folded = trimText(value):gsub("[%z\1-\127\194-\244][\128-\191]*", lowercaseCharacters)
+  return string.lower(folded)
 end
 
 local function getLocalizedEnemyName(mdt, enemyData)
@@ -97,6 +222,10 @@ local function getSpellNameById(spellId)
     if name and name ~= "" then
       return name
     end
+  end
+  if C_Spell and type(C_Spell.RequestLoadSpellData) == "function" and state.pendingSpells[spellId] == nil then
+    state.pendingSpells[spellId] = true
+    C_Spell.RequestLoadSpellData(spellId)
   end
   return string.format("Spell #%d", spellId)
 end
@@ -140,6 +269,8 @@ local function buildSpellSearchIndexForDungeon(mdt, dungeonIdx)
             enemyName = enemyName,
             enemyNameNormalized = normalizeText(enemyName),
             sourceLabel = sourceLabel,
+            dungeonIdx = dungeonIdx,
+            sublevel = mdt.GetCurrentSubLevel and mdt:GetCurrentSubLevel(),
           }
           seen[uniqueKey] = true
         end
@@ -174,13 +305,16 @@ local function getSpellSearchIndex(mdt)
     return nil
   end
 
-  local index = state.spellSearchIndexByDungeon[dungeonIdx]
+  local enemies = mdt.dungeonEnemies and mdt.dungeonEnemies[dungeonIdx]
+  if type(enemies) ~= "table" or not next(enemies) then return nil end
+  local index = state.spellSearchSources[dungeonIdx] == enemies and state.spellSearchIndexByDungeon[dungeonIdx]
   if index then
     return index
   end
 
   index = buildSpellSearchIndexForDungeon(mdt, dungeonIdx)
   state.spellSearchIndexByDungeon[dungeonIdx] = index
+  state.spellSearchSources[dungeonIdx] = enemies
   return index
 end
 
@@ -203,8 +337,119 @@ local function hideSpellSearchResults()
   state.spellSearchResultEntries = nil
 end
 
-local function openEnemyInfoForEnemyIdx(enemyIdx)
-  local mdt = _G.MDT
+local function getEnemyInfoWidget()
+  local mdt = getMDT()
+  if not mdt then return nil end
+  if not mdt.visibleMapOnly then return mdt.EnemyInfoFrame end
+  local mainFrame = mdt.main_frame
+  if not mainFrame then return nil end
+  local function isEnemyInfo(widget)
+    return type(widget) == "table" and widget.type == "Frame" and widget.frame
+      and widget.frame:GetParent() == mainFrame and widget.enemyDropDown and widget.enemyDataContainer
+      and widget.tabGroup and widget.model and type(widget.Hide) == "function"
+  end
+  if isEnemyInfo(state.enemyInfoWidget) then return state.enemyInfoWidget end
+  state.enemyInfoWidget = nil
+  for _, child in ipairs({ mainFrame:GetChildren() }) do
+    if isEnemyInfo(child.obj) then
+      state.enemyInfoWidget = child.obj
+      return child.obj
+    end
+  end
+end
+
+local function installMenuHook()
+  if state.menuHooked then return true end
+  if not (Menu and type(Menu.PopulateDescription) == "function" and type(hooksecurefunc) == "function") then
+    return false
+  end
+  -- Observe only synchronous menu generation requested by this shortcut.
+  -- Ordinary menus are untouched; descriptions are never cached.
+  hooksecurefunc(Menu, "PopulateDescription", function(_, owner, description)
+    local request = state.menuRequest
+    if request and owner == request.owner and not request.description then
+      request.description = description
+    end
+  end)
+  state.menuHooked = true
+  return true
+end
+
+local function openNativeEnemyInfo(blip, originalOnClick)
+  local mdt = getMDT()
+  local db = mdt and mdt:GetDB()
+  if not mdt or (db and db.devMode) or state.menuRequest then return false end
+  installMenuHook()
+  local request = { owner = mdt.main_frame }
+  state.menuRequest = request
+  -- Run MDT's own handler, including its restricted-environment checks.
+  local ok, message = pcall(originalOnClick, blip, "RightButton", false)
+  state.menuRequest = nil
+  if not ok then
+    state.lastEnemyInfoAction = "MDT handler error"
+    geterrorhandler()(message)
+    return true
+  end
+  local root = request.description
+  request.description = nil
+  if root and type(root.EnumerateElementDescriptions) == "function"
+    and MenuUtil and type(MenuUtil.GetElementText) == "function" and MenuInputContext then
+    local locale = GAME_LOCALE or (GetLocale and GetLocale()) or "enUS"
+    local label = ENEMY_INFO_MENU_LABELS[locale] or ENEMY_INFO_MENU_LABELS.enUS
+    local match
+    for _, element in root:EnumerateElementDescriptions() do
+      local text = MenuUtil.GetElementText(element)
+      if text == label or text == ENEMY_INFO_MENU_LABELS.enUS then
+        if match then match = nil; break end
+        match = element
+      end
+    end
+    if match and type(match.Pick) == "function" then
+      local pickedOK, picked = pcall(match.Pick, match, MenuInputContext.MouseButton, "LeftButton")
+      if not pickedOK then
+        state.lastEnemyInfoAction = "Enemy Info action error"
+        geterrorhandler()(picked)
+        return true
+      end
+      if picked then
+        state.lastEnemyInfoAction = "opened through native menu"
+        getEnemyInfoWidget()
+        return true
+      end
+    end
+  end
+  state.lastEnemyInfoAction = "native menu fallback or MDT restriction"
+  if state.debug then report("Enemy Info shortcut unavailable; use the native menu if shown.") end
+  return true -- The original handler already ran: never execute it twice.
+end
+
+local function openEnemyInfoForEnemyIdx(enemyIdx, dungeonIdx, sublevel)
+  local mdt = getMDT()
+  if dungeonIdx and dungeonIdx ~= getSpellSearchDungeonIdx(mdt) then
+    report("The dungeon changed. Search again.")
+    return
+  end
+  if mdt and mdt.visibleMapOnly then
+    if sublevel ~= mdt:GetCurrentSubLevel() then
+      report("The floor changed. Search again.")
+      return
+    end
+    local db = mdt:GetDB()
+    -- A right click in dev mode edits NPCs; never simulate that action.
+    if db and db.devMode then
+      report("Enemy menu is unavailable while MDT developer mode is enabled.")
+      return
+    end
+    refreshVisibleMapData()
+    for _, blip in ipairs(state.visibleBlips) do
+      if blip.enemyIdx == enemyIdx and type(blip.OnClick) == "function" then
+        openNativeEnemyInfo(blip, state.originalEnemyClicks[blip.OnClick] or blip.OnClick)
+        return
+      end
+    end
+    report("This enemy is no longer on the current map. Search again.")
+    return
+  end
   if not mdt or type(mdt.ShowEnemyInfoFrame) ~= "function" then
     return
   end
@@ -217,7 +462,7 @@ local function updateSpellSearchResults()
     return
   end
 
-  local mdt = _G.MDT
+  local mdt = getMDT()
   if not mdt then
     hideSpellSearchResults()
     return
@@ -229,7 +474,7 @@ local function updateSpellSearchResults()
     return
   end
 
-  local searchText = string.lower(query)
+  local searchText = normalizeText(query)
   local queryIsNumber = tonumber(searchText) ~= nil
   local index = getSpellSearchIndex(mdt) or {}
   local matches = {}
@@ -276,16 +521,17 @@ end
 
 local function refreshSpellSearchForDungeonChange()
   local ui = state.spellSearchUI
-  local mdt = _G.MDT
+  local mdt = getMDT()
   if not ui or not mdt then
     return
   end
 
   local currentDungeonIdx = getSpellSearchDungeonIdx(mdt)
-  if state.spellSearchLastDungeonIdx == currentDungeonIdx then
+  if state.spellSearchLastDungeonIdx == currentDungeonIdx and not state.spellSearchDirty then
     return
   end
   state.spellSearchLastDungeonIdx = currentDungeonIdx
+  state.spellSearchDirty = false
 
   if trimText(ui.editBox:GetText() or "") ~= "" then
     updateSpellSearchResults()
@@ -299,7 +545,7 @@ local function installSpellSearchUI()
     return true
   end
 
-  local mdt = _G.MDT
+  local mdt = getMDT()
   local mainFrame = mdt and mdt.main_frame
   local topPanel = mainFrame and mainFrame.topPanel
   if not topPanel then
@@ -328,7 +574,7 @@ local function installSpellSearchUI()
   editBox:SetScript("OnEnterPressed", function(self)
     local entries = state.spellSearchResultEntries
     if entries and entries[1] then
-      openEnemyInfoForEnemyIdx(entries[1].enemyIdx)
+      openEnemyInfoForEnemyIdx(entries[1].enemyIdx, entries[1].dungeonIdx, entries[1].sublevel)
       self:ClearFocus()
     end
   end)
@@ -366,11 +612,21 @@ local function installSpellSearchUI()
     row:RegisterForClicks("LeftButtonUp")
     row:SetScript("OnClick", function(self)
       if self.entry then
-        openEnemyInfoForEnemyIdx(self.entry.enemyIdx)
+        openEnemyInfoForEnemyIdx(self.entry.enemyIdx, self.entry.dungeonIdx, self.entry.sublevel)
       end
     end)
 
     local highlight = row:CreateTexture(nil, "HIGHLIGHT")
+    row:SetScript("OnEnter", function(self)
+      if self.entry and GameTooltip then
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:SetSpellByID(self.entry.spellId)
+        GameTooltip:Show()
+      end
+    end)
+    row:SetScript("OnLeave", function()
+      if GameTooltip then GameTooltip:Hide() end
+    end)
     highlight:SetAllPoints()
     highlight:SetColorTexture(1, 1, 1, 0.12)
 
@@ -405,64 +661,55 @@ local function shouldOpenEnemyInfo(button)
   return IsControlKeyDown() and button == ENEMY_INFO_MOUSE_BUTTON
 end
 
-local function shouldCloseEnemyInfo(buttonDown, wasButtonDown)
-  if not (IsControlKeyDown() and buttonDown and not wasButtonDown) then
-    return false
+local function isMouseInsideEnemyInfo(window)
+  -- Child controls (model, spell list, text fields) can own mouse focus.
+  if type(GetMouseFoci) == "function" then
+    for _, focus in ipairs(GetMouseFoci()) do
+      local ancestor = focus
+      while ancestor do
+        if ancestor == window then return true end
+        ancestor = ancestor.GetParent and ancestor:GetParent()
+      end
+    end
+    return false -- Do not close through an unrelated overlapping window.
   end
-
-  local mdt = _G.MDT
-  local enemyInfoFrame = mdt and mdt.EnemyInfoFrame
-  local enemyInfoWidgetFrame = enemyInfoFrame and enemyInfoFrame.frame
-  if not (enemyInfoWidgetFrame and enemyInfoWidgetFrame:IsShown()) then
-    return false
-  end
-
-  return MouseIsOver(enemyInfoWidgetFrame)
+  return MouseIsOver(window)
 end
 
-local function handleEnemyInfoCloseHotkey()
-  if type(IsMouseButtonDown) ~= "function" then
-    return
-  end
-
-  local buttonDown = IsMouseButtonDown(ENEMY_INFO_MOUSE_BUTTON)
-  local wasButtonDown = state.rightButtonDown
-  state.rightButtonDown = buttonDown
-
-  if state.suppressEnemyInfoCloseUntilRightButtonRelease then
-    if not buttonDown then
-      state.suppressEnemyInfoCloseUntilRightButtonRelease = false
+local function handleEnemyInfoMouseEvent(event, button)
+  if button ~= ENEMY_INFO_MOUSE_BUTTON then return end
+  if event == "GLOBAL_MOUSE_UP" then
+    if state.closingEnemyInfoClick then
+      state.closingEnemyInfoClick = false
+      state.suppressEnemyClickUntil = GetTime() + 0.2
     end
     return
   end
-
-  if not shouldCloseEnemyInfo(buttonDown, wasButtonDown) then
-    return
-  end
-
-  local enemyInfoFrame = _G.MDT and _G.MDT.EnemyInfoFrame
-  if enemyInfoFrame and type(enemyInfoFrame.Hide) == "function" then
+  if not (state.enabled and IsControlKeyDown()) then return end
+  local enemyInfoFrame = getEnemyInfoWidget()
+  local window = enemyInfoFrame and enemyInfoFrame.frame
+  if window and window:IsVisible() and isMouseInsideEnemyInfo(window) then
     enemyInfoFrame:Hide()
+    state.closingEnemyInfoClick = true
+    state.suppressEnemyClickUntil = GetTime() + 0.2
+    state.lastEnemyInfoAction = "closed with Ctrl+RightClick"
+    if state.debug then report("Enemy Info: " .. state.lastEnemyInfoAction) end
+  elseif state.debug then
+    report("Enemy Info close: " .. (not window and "window not found"
+      or not window:IsVisible() and "window hidden" or "click outside window"))
   end
 end
 
-local function installEnemyInfoHook()
-  if state.enemyInfoHooked then
-    return true
-  end
-
-  local mixin = _G.MDTDungeonEnemyMixin
-  if not mixin or type(mixin.OnClick) ~= "function" then
-    return false
-  end
-
-  local originalOnClick = mixin.OnClick
-  mixin.OnClick = function(self, button, down)
-    local mdt = _G.MDT
+local function wrapEnemyClick(originalOnClick)
+  local wrapped = function(self, button, down)
+    local mdt = getMDT()
     if mdt and shouldOpenEnemyInfo(button) then
+      if state.closingEnemyInfoClick or GetTime() < state.suppressEnemyClickUntil then return end
       local db = mdt.GetDB and mdt:GetDB()
+      if not (db and db.devMode) and mdt.visibleMapOnly then
+        if openNativeEnemyInfo(self, originalOnClick) then return end
+      end
       if not (db and db.devMode) and type(mdt.ShowEnemyInfoFrame) == "function" then
-        state.suppressEnemyInfoCloseUntilRightButtonRelease = true
         mdt:ShowEnemyInfoFrame(self)
         return
       end
@@ -470,21 +717,28 @@ local function installEnemyInfoHook()
 
     return originalOnClick(self, button, down)
   end
-
-  state.enemyInfoHooked = true
-  return true
+  state.originalEnemyClicks[wrapped] = originalOnClick
+  return wrapped
 end
 
-local function scheduleEnemyInfoHook(attempt)
-  if installEnemyInfoHook() then
-    return
+local function installEnemyInfoHook()
+  local mdt = getMDT()
+  local mixin = _G.MDTDungeonEnemyMixin
+  if not mdt or not mixin or type(mixin.OnClick) ~= "function" then return false end
+  if mdt.visibleMapOnly then installMenuHook() end
+  if not state.enemyInfoHooked then
+    mixin.OnClick = wrapEnemyClick(mixin.OnClick)
+    state.enemyInfoHooked = true
   end
-  if attempt >= HOOK_RETRY_MAX_ATTEMPTS then
-    return
+  -- XML mixins are copied into frames. Also update buttons created before us.
+  local blips = mdt.GetDungeonEnemyBlips and mdt:GetDungeonEnemyBlips()
+  for _, blip in pairs(blips or {}) do
+    if not state.hookedEnemyButtons[blip] and type(blip.OnClick) == "function" then
+      if not state.originalEnemyClicks[blip.OnClick] then blip.OnClick = wrapEnemyClick(blip.OnClick) end
+      state.hookedEnemyButtons[blip] = true
+    end
   end
-  C_Timer.After(HOOK_RETRY_DELAY_SECONDS, function()
-    scheduleEnemyInfoHook(attempt + 1)
-  end)
+  return true
 end
 
 local function hideAllLabels()
@@ -543,7 +797,7 @@ local function getPullPercentText(mdt, pullIdx, sidebarProgressByPull)
 
   -- Fallback for early-load moments when sidebar widgets are not ready yet.
   local db = mdt.GetDB and mdt:GetDB()
-  if not db or not db.currentDungeonIdx then
+  if not db or not db.currentDungeonIdx or type(mdt.CountForces) ~= "function" then
     return nil
   end
 
@@ -700,7 +954,7 @@ local function collectPullCentersFromVisibleBlips(mdt)
 
               if included then
                 local blip = blipByEnemyClone[enemyIdx .. ":" .. cloneIdx]
-                if blip then
+                if blip and blip:IsShown() then
                   local _, _, _, x, y = blip:GetPoint()
                   if x and y then
                     totalX = totalX + x
@@ -728,6 +982,8 @@ end
 
 local function collectPullCentersFromPresetData(mdt)
   local centersByPull = {}
+  -- Visible pin positions already include zoom and MDT's exclusion rules.
+  if mdt.visibleMapOnly then return centersByPull end
   local db = mdt and mdt.GetDB and mdt:GetDB()
   local currentDungeonIdx = db and db.currentDungeonIdx
   if not currentDungeonIdx then
@@ -746,6 +1002,7 @@ local function collectPullCentersFromPresetData(mdt)
   end
 
   local currentSubLevel = nil
+  local mapScale = type(mdt.GetScale) == "function" and mdt:GetScale() or 1
   if type(mdt.GetCurrentSubLevel) == "function" then
     currentSubLevel = tonumber(mdt:GetCurrentSubLevel())
   end
@@ -774,8 +1031,8 @@ local function collectPullCentersFromPresetData(mdt)
               local cloneSubLevel = tonumber(cloneData.sublevel)
               local onCurrentSubLevel = (not currentSubLevel) or (not cloneSubLevel) or (cloneSubLevel == currentSubLevel)
               if included and onCurrentSubLevel and cloneData.x and cloneData.y then
-                totalX = totalX + cloneData.x
-                totalY = totalY + cloneData.y
+                totalX = totalX + cloneData.x * mapScale
+                totalY = totalY + cloneData.y * mapScale
                 count = count + 1
               end
             end
@@ -815,7 +1072,7 @@ local function getCurrentPresetPullIndexes(mdt)
 end
 
 local function refreshOverlay()
-  local mdt = _G.MDT
+  local mdt = getMDT()
   if not shouldShowOverlay(mdt) then
     hideAllLabels()
     return
@@ -935,30 +1192,100 @@ local function onUpdate(_, elapsed)
     return
   end
 
-  handleEnemyInfoCloseHotkey()
-
   state.elapsed = state.elapsed + elapsed
   if state.elapsed < UPDATE_INTERVAL_SECONDS then
     return
   end
   state.elapsed = 0
 
+  local mdt = getMDT()
+  refreshVisibleMapData()
+  local mainFrame = mdt and mdt.main_frame
+  if not mainFrame or not mainFrame:IsShown() then
+    hideAllLabels()
+    return
+  end
+  installEnemyInfoHook()
   installSpellSearchUI()
+  local mapActive = not mdt.IsMapSectionActive or mdt:IsMapSectionActive()
+  if state.spellSearchUI then state.spellSearchUI.container:SetShown(mapActive) end
+  if not mapActive then
+    hideSpellSearchResults()
+    hideAllLabels()
+    state.spellSearchDirty = true
+    return
+  end
   refreshSpellSearchForDungeonChange()
   refreshOverlay()
 end
 
-local function onAddonLoaded(_, _, loadedAddonName)
+local function onAddonLoaded(_, event, loadedAddonName, success)
+  if event == "GLOBAL_MOUSE_DOWN" or event == "GLOBAL_MOUSE_UP" then
+    handleEnemyInfoMouseEvent(event, loadedAddonName)
+    return
+  end
+  if event == "SPELL_DATA_LOAD_RESULT" then
+    if state.pendingSpells[loadedAddonName] then
+      state.pendingSpells[loadedAddonName] = false
+      if success then
+        state.spellSearchIndexByDungeon = {}
+        state.spellSearchDirty = true
+      end
+    end
+    return
+  end
   if loadedAddonName == addonName then
     state.enabled = true
     frame:SetScript("OnUpdate", onUpdate)
-    scheduleEnemyInfoHook(1)
-    return
   end
 
-  if _G.MDT and not state.enemyInfoHooked then
-    scheduleEnemyInfoHook(1)
+  if loadedAddonName == addonName or loadedAddonName == "MythicDungeonTools" or loadedAddonName == "MythicDungeonTools_UI" then
+    resolveMDT()
+    installEnemyInfoHook()
+    -- Other ADDON_LOADED handlers may still be initializing the MDT runtime.
+    C_Timer.After(0, function()
+      resolveMDT()
+      installEnemyInfoHook()
+    end)
   end
 end
 
+SLASH_MDTQOL1 = "/mdtqol"
+SlashCmdList.MDTQOL = function(message)
+  local command = normalizeText(message)
+  if command == "debug" then
+    state.debug = not state.debug
+    report("Debug " .. (state.debug and "on" or "off") .. ".")
+  elseif command == "refresh" then
+    state.spellSearchIndexByDungeon = {}
+    state.pendingSpells = {}
+    state.spellSearchDirty = true
+    resolveMDT()
+    report("Search cache cleared; open MDT to refresh.")
+  elseif command == "status" or command == "" then
+    resolveMDT()
+    local mdt = getMDT()
+    refreshVisibleMapData()
+    local version, build, _, interface = GetBuildInfo()
+    local metadata = C_AddOns and C_AddOns.GetAddOnMetadata
+    report(string.format("QoL %s; WoW %s (%s), interface %s; MDT %s",
+      metadata and metadata(addonName, "Version") or "?", tostring(version), tostring(build), tostring(interface),
+      metadata and metadata("MythicDungeonTools", "Version") or "?"))
+    report("Connection: " .. state.connection)
+    local index = mdt and getSpellSearchIndex(mdt)
+    report(string.format("Window: %s; search: %s; Ctrl+RightClick: %s; dungeon: %s; spell/enemy entries: %d",
+      mdt and mdt.main_frame and "created" or "not created", state.spellSearchUI and "created" or "not created",
+      state.enemyInfoHooked and "hooked" or "waiting",
+      tostring(getSpellSearchDungeonIdx(mdt)), index and #index or 0))
+    local info = getEnemyInfoWidget()
+    report("Enemy Info: " .. state.lastEnemyInfoAction .. "; window: "
+      .. (info and (info.frame:IsVisible() and "visible" or "hidden") or "not found"))
+  else
+    report("/mdtqol status | debug | refresh")
+  end
+end
+
+frame:RegisterEvent("SPELL_DATA_LOAD_RESULT")
+frame:RegisterEvent("GLOBAL_MOUSE_DOWN")
+frame:RegisterEvent("GLOBAL_MOUSE_UP")
 frame:SetScript("OnEvent", onAddonLoaded)
