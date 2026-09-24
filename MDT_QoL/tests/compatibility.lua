@@ -8,6 +8,7 @@ function methods:GetScript(event) return self.scripts[event] end
 function methods:GetChildren() return unpack(self.children) end
 function methods:GetParent() return self.parent end
 function methods:SetParent(parent) self.parent = parent end
+function methods:EnableMouse(enabled) self.mouseEnabled = enabled end
 function methods:IsShown() return self.shown end
 function methods:IsVisible() return self.shown and (not self.parent or self.parent:IsVisible()) end
 function methods:Show() self.shown = true end
@@ -17,12 +18,17 @@ function methods:SetPoint(...) self.point = {...} end
 function methods:GetPoint() return unpack(self.point or {}) end
 function methods:SetFrameLevel(level) self.level = level end
 function methods:GetFrameLevel() return self.level or 1 end
+function methods:GetScale() return self.scale or 1 end
+function methods:SetScale(scale) self.scale = scale end
+function methods:GetEffectiveScale()
+  return self:GetScale() * (self.parent and self.parent:GetEffectiveScale() or 1)
+end
 function methods:SetText(text)
   self.text = text
   if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self) end
 end
 function methods:GetText() return self.text end
-function methods:SetFont() return true end
+function methods:SetFont(_, size) self.fontSize=size; return true end
 function methods:CreateTexture() return CreateFrame("Texture", nil, self) end
 function methods:CreateFontString() return CreateFrame("FontString", nil, self) end
 for _, name in ipairs({ "SetSize", "SetWidth", "SetHeight", "SetFrameStrata", "SetAllPoints", "SetColorTexture",
@@ -51,7 +57,7 @@ function geterrorhandler() return function(message) errors[#errors+1]=message en
 function GetBuildInfo() return "12.1.0", "69587", "", 120100 end
 SlashCmdList = {}
 C_Timer = {After = function(_, fn) timers[#timers+1] = fn end}
-C_AddOns = {GetAddOnMetadata = function(name) return name == "MDT_QoL" and "0.5.0-test.3" or "6.2.15" end}
+C_AddOns = {GetAddOnMetadata = function(name) return name == "MDT_QoL" and "0.6.0" or "6.2.16" end}
 local spellNames = {[101]="Fire Bolt", [102]="Frost Blast", [104]="Shadow Burst"}
 C_Spell = {
   GetSpellName = function(id) return spellNames[id] end,
@@ -63,7 +69,10 @@ local db = {currentDungeonIdx=1, currentPreset={[1]=1,[2]=1}, currentSection="ma
 }}
 MythicDungeonToolsAPI = {GetDB=function() return db end}
 local source = assert(io.open("MDT_QoL.lua", "rb")):read("*a")
-assert(loadstring(source, "@MDT_QoL.lua"))("MDT_QoL")
+local addon = {}
+local compactSource = assert(io.open("MDT_QoL_Compact.lua", "rb")):read("*a")
+assert(loadstring(compactSource, "@MDT_QoL_Compact.lua"))("MDT_QoL", addon)
+assert(loadstring(source, "@MDT_QoL.lua"))("MDT_QoL", addon)
 local controller = frames[1]
 local function event(name, ...)
   assert(controller.events[name], "event must be registered: "..name)
@@ -75,11 +84,13 @@ for _=1,100 do tick() end -- no ten-second initialization deadline
 assert(not _G.MDT, "must not restore or require a global MDT")
 assert(#frames == 1, "must not force-load the MDT UI")
 
-MDTFrame = CreateFrame("Frame")
+UIParent = CreateFrame("Frame")
+MDTFrame = CreateFrame("Frame", nil, UIParent)
 MDTFrame.topPanel = CreateFrame("Frame", nil, MDTFrame)
 MDTFrame.mapPanelFrame = CreateFrame("Frame", nil, MDTFrame)
 MDTFrame.mapPanelTile1 = CreateFrame("Texture", nil, MDTFrame.mapPanelFrame)
-MDTFrame.sidePanel = {newPullButtons={}}
+MDTFrame.sidePanel = CreateFrame("Frame", nil, MDTFrame)
+MDTFrame.sidePanel.newPullButtons = {}
 local menuCalls, lastEnemy, infoCalls, menuOpen, infoWidget = 0, nil, 0, false, nil
 local hookCalls = 0
 function hooksecurefunc(target, name, callback)
@@ -213,7 +224,7 @@ assert(edit.parent:IsShown() and #rows()==1, "restore search when returning to m
 
 -- Percentages come verbatim from the sidebar, with actual scaled pin positions.
 db.presets[2][1].value.pulls={{[1]={1}}}
-local pct=CreateFrame("FontString")
+local pct=CreateFrame("FontString", nil, MDTFrame.sidePanel)
 pct:SetText("23.45%")
 MDTFrame.sidePanel.newPullButtons[1]={percentageFontString=pct}
 control=true
@@ -221,7 +232,26 @@ tick()
 local label
 for _, f in ipairs(frames) do if f.kind=="FontString" and f~=pct and f.text=="23.45%" then label=f end end
 assert(label and label:IsShown(), "render Ctrl percentages from MDT sidebar")
-assert(label.parent.point[4]==200 and label.parent.point[5]==-200, "use scaled pin coordinates")
+MDTFrame.sidePanel:Hide(); tick()
+assert(label:IsShown() and label:GetText()=="23.45%", "Ctrl percentages must work with the sidebar hidden in compact mode")
+MDTFrame.sidePanel:Show()
+assert(label.parent.parent.point[4]==200 and label.parent.parent.point[5]==-200, "use scaled pin coordinates")
+local badge=label:GetParent()
+assert(badge.mouseEnabled==false, "percentage badge must not intercept map clicks")
+local zoomFrameCount=#frames
+for _,uiScale in ipairs({0.64,1,1.25}) do
+  UIParent:SetScale(uiScale)
+  for _,zoom in ipairs({1,2.5,5,10,15,1}) do
+    MDTFrame.mapPanelFrame:SetScale(zoom); tick()
+    assert(math.abs(label:GetEffectiveScale()*label.fontSize-16*uiScale)<0.0001,
+      "percentage text stays readable and bounded independently of map zoom")
+    assert(math.abs(badge:GetEffectiveScale()-uiScale)<0.0001,
+      "background, padding and label share the user's UI scale")
+    assert(label:GetText()=="23.45%", "zoom must not affect percentage values")
+  end
+end
+assert(#frames==zoomFrameCount, "zoom changes reuse badge frames")
+UIParent:SetScale(1); MDTFrame.mapPanelFrame:SetScale(1)
 control=false
 tick()
 assert(not label:IsShown(), "hide percentage when Ctrl released")
@@ -362,6 +392,64 @@ if reference then
 end
 
 -- Repeated use must not allocate more QoL frames or stack hooks/wrappers.
+-- Match the public structure created by MDT's PullOutlines.lua: a numbered
+-- container under the map, with an interactive clickArea beneath it.
+local pullContainer=CreateFrame("Frame",nil,MDTFrame.mapPanelFrame)
+pullContainer.pullIdx=1
+pullContainer.fs=CreateFrame("FontString",nil,pullContainer)
+pullContainer.clickArea=CreateFrame("Button",nil,pullContainer)
+local sidebarRows={CreateFrame("Button",nil,MDTFrame),CreateFrame("Button",nil,MDTFrame)}
+local oldButtons=MDTFrame.sidePanel.newPullButtons
+MDTFrame.sidePanel.newPullButtons={
+  {frame=sidebarRows[1],index=1}, {frame=sidebarRows[2],index=2},
+}
+local route=db.presets[2][1].value
+route.pulls[2]={}
+route.currentPull=2
+sidebarRows[2].pickedGlow=CreateFrame("Texture",nil,sidebarRows[2])
+control=false
+local function hoverUpdate() controller.scripts.OnUpdate(controller,0.001) end
+hovered=pullContainer.clickArea
+local beforeHoverFrames=#frames
+hoverUpdate()
+local hoverOverlay=frames[beforeHoverFrames+1]
+assert(hoverOverlay and hoverOverlay:GetParent()==sidebarRows[1] and hoverOverlay:IsShown(), "map hover highlights matching sidebar row without Ctrl")
+assert(hoverOverlay.mouseEnabled==false, "hover overlay must not intercept mouse input")
+assert(route.currentPull==2 and sidebarRows[2].pickedGlow:IsShown(), "hover must preserve native selection")
+local hoverFrameCount=#frames
+for i=1,1000 do
+  pullContainer.pullIdx=i%2+1 -- pooled containers can change their pull number
+  hoverUpdate()
+  assert(hoverOverlay:GetParent()==sidebarRows[pullContainer.pullIdx], "follow current pool index")
+  hovered=MDTFrame.mapPanelFrame; hoverUpdate()
+  assert(not hoverOverlay:IsShown(), "clear highlight on leaving the native hover area")
+  hovered=pullContainer.clickArea
+end
+assert(#frames==hoverFrameCount, "reuse one overlay across all rows and hover cycles")
+hoverUpdate()
+MDTFrame.sidePanel.newPullButtons[2].dragging=true; hoverUpdate()
+assert(not hoverOverlay:IsShown(), "hide during sidebar drag")
+MDTFrame.sidePanel.newPullButtons[2].dragging=false
+pullContainer:Hide(); hoverUpdate()
+assert(not hoverOverlay:IsShown(), "ignore hidden/released map containers")
+pullContainer:Show()
+db.currentSection="settings"; hoverUpdate()
+assert(not hoverOverlay:IsShown(), "clear when leaving map section")
+db.currentSection="maps"
+MDTFrame:Hide(); hoverUpdate()
+assert(not hoverOverlay:IsShown(), "clear when MDT closes")
+MDTFrame:Show()
+local originalPulls=route.pulls
+route.pulls={}; hoverUpdate()
+assert(not hoverOverlay:IsShown(), "reject old container when new route has no such pull")
+route.pulls=originalPulls
+hovered=sidebarRows[1]; hoverUpdate()
+assert(not hoverOverlay:IsShown(), "leave native sidebar hover handling alone")
+route.pulls[2]=nil
+MDTFrame.sidePanel.newPullButtons=oldButtons
+control=true
+io.write("PASS: map-to-sidebar hover, selection preserved, pooled containers, hide/drag/route cleanup, 1000 hover cycles with one overlay\n")
+
 local frameCount, originalWrapped = #frames, late.OnClick
 collectgarbage("collect")
 local memoryBefore=collectgarbage("count")

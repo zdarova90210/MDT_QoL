@@ -1,10 +1,11 @@
-local addonName = ...
+local addonName, addon = ...
+addon = addon or {}
 
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
 
 local UPDATE_INTERVAL_SECONDS = 0.1
-local FONT_SIZE = 12
+local FONT_SIZE = 16
 local LABEL_HORIZONTAL_PADDING = 5
 local LABEL_VERTICAL_PADDING = 3
 local LABEL_ROUNDED_CAP_WIDTH = math.floor((FONT_SIZE + (2 * LABEL_VERTICAL_PADDING)) / 2)
@@ -70,6 +71,7 @@ local state = {
   lastEnemyInfoAction = "not used",
   suppressEnemyClickUntil = 0,
   closingEnemyInfoClick = false,
+  pullHoverOverlay = nil,
 }
 
 local function report(message)
@@ -820,20 +822,23 @@ end
 local function ensureLabel(anchorFrame, pullIdx)
   local entry = state.labelsByPull[pullIdx]
   if not entry then
-    local backgroundCenter = anchorFrame:CreateTexture(nil, "OVERLAY", nil, -1)
+    local container = CreateFrame("Frame", nil, anchorFrame)
+    container:SetSize(1, 1)
+    container:EnableMouse(false)
+    local backgroundCenter = container:CreateTexture(nil, "OVERLAY", nil, -1)
     backgroundCenter:SetColorTexture(0, 0, 0, LABEL_BACKGROUND_ALPHA)
 
-    local backgroundLeftCap = anchorFrame:CreateTexture(nil, "OVERLAY", nil, -1)
+    local backgroundLeftCap = container:CreateTexture(nil, "OVERLAY", nil, -1)
     backgroundLeftCap:SetTexture(ROUNDED_CAP_TEXTURE)
     backgroundLeftCap:SetVertexColor(0, 0, 0, LABEL_BACKGROUND_ALPHA)
     backgroundLeftCap:SetTexCoord(0, 0.5, 0, 1)
 
-    local backgroundRightCap = anchorFrame:CreateTexture(nil, "OVERLAY", nil, -1)
+    local backgroundRightCap = container:CreateTexture(nil, "OVERLAY", nil, -1)
     backgroundRightCap:SetTexture(ROUNDED_CAP_TEXTURE)
     backgroundRightCap:SetVertexColor(0, 0, 0, LABEL_BACKGROUND_ALPHA)
     backgroundRightCap:SetTexCoord(0.5, 1, 0, 1)
 
-    local label = anchorFrame:CreateFontString(nil, "OVERLAY", nil)
+    local label = container:CreateFontString(nil, "OVERLAY", nil)
     applyPercentFont(label)
     label:SetTextColor(1, 1, 1, 1)
     label:SetShadowColor(0, 0, 0, 1)
@@ -851,6 +856,7 @@ local function ensureLabel(anchorFrame, pullIdx)
     backgroundRightCap:SetPoint("BOTTOMRIGHT", label, "BOTTOMRIGHT", LABEL_HORIZONTAL_PADDING, -LABEL_VERTICAL_PADDING)
 
     entry = {
+      container = container,
       label = label,
       backgroundCenter = backgroundCenter,
       backgroundLeftCap = backgroundLeftCap,
@@ -859,15 +865,21 @@ local function ensureLabel(anchorFrame, pullIdx)
     state.labelsByPull[pullIdx] = entry
   end
 
-  if entry.label:GetParent() ~= anchorFrame then
-    entry.label:SetParent(anchorFrame)
-    entry.backgroundCenter:SetParent(anchorFrame)
-    entry.backgroundLeftCap:SetParent(anchorFrame)
-    entry.backgroundRightCap:SetParent(anchorFrame)
+  local container = entry.container
+  if container:GetParent() ~= anchorFrame then
+    container:SetParent(anchorFrame)
   end
 
+  -- Cancel inherited map zoom for the whole badge, including its padding.
+  -- Keep the user's global UI scale: 16 UI units at every map/window size.
+  local parentScale = anchorFrame:GetEffectiveScale()
+  local uiScale = UIParent:GetEffectiveScale()
+  local scale = parentScale > 0 and uiScale / parentScale or 1
+  if container:GetScale() ~= scale then container:SetScale(scale) end
+  container:ClearAllPoints()
+  container:SetPoint("TOP", anchorFrame.fs or anchorFrame, "BOTTOM", 0, LABEL_Y_OFFSET)
   entry.label:ClearAllPoints()
-  entry.label:SetPoint("TOP", anchorFrame.fs or anchorFrame, "BOTTOM", 0, LABEL_Y_OFFSET)
+  entry.label:SetPoint("TOP", container, "TOP", 0, 0)
   return entry
 end
 
@@ -1187,10 +1199,86 @@ local function refreshOverlay()
   end
 end
 
+local function hidePullHover()
+  if state.pullHoverOverlay then state.pullHoverOverlay:Hide() end
+end
+
+local function refreshPullHover()
+  local mdt = getMDT()
+  local main = mdt and mdt.main_frame
+  local map = main and main.mapPanelFrame
+  local buttons = main and main.sidePanel and main.sidePanel.newPullButtons
+  if not (map and map:IsVisible() and buttons and type(GetMouseFoci) == "function")
+    or (mdt.IsMapSectionActive and not mdt:IsMapSectionActive()) then
+    hidePullHover()
+    return
+  end
+
+  local pullIdx
+  for _, focus in ipairs(GetMouseFoci()) do
+    -- Match MDT's actual hover area, not the bounding rectangle of the hull.
+    local container = focus.GetParent and focus:GetParent()
+    if container and container:GetParent() == map and container.clickArea == focus
+      and container.fs and container:IsVisible() and focus:IsVisible() then
+      pullIdx = tonumber(container.pullIdx)
+      if pullIdx then break end
+    end
+  end
+  if not pullIdx then hidePullHover(); return end
+  local button = buttons[pullIdx]
+  local row = button and button.frame
+  local preset = mdt.GetCurrentPreset and mdt:GetCurrentPreset()
+  local pulls = preset and preset.value and preset.value.pulls
+  if not (row and row:IsVisible() and pulls and pulls[pullIdx])
+    or (button.index and button.index ~= pullIdx) then
+    hidePullHover()
+    return
+  end
+  for _, other in pairs(buttons) do
+    if other.dragging then hidePullHover(); return end
+  end
+
+  -- One reusable, mouse-transparent overlay. Never lock MDT's own highlight:
+  -- MDT uses it for persistent selection, and its OnEnter also opens tooltips.
+  local overlay = state.pullHoverOverlay
+  if not overlay then
+    overlay = CreateFrame("Frame", nil, row)
+    overlay:EnableMouse(false)
+    overlay:SetAllPoints(row)
+    local fill = overlay:CreateTexture(nil, "OVERLAY")
+    fill:SetAllPoints(overlay)
+    fill:SetColorTexture(1, 1, 1, 0.12)
+    for _, edge in ipairs({ "TOP", "BOTTOM", "LEFT", "RIGHT" }) do
+      local border = overlay:CreateTexture(nil, "OVERLAY")
+      border:SetColorTexture(1, 1, 1, 0.65)
+      if edge == "TOP" or edge == "BOTTOM" then
+        border:SetHeight(1)
+        border:SetPoint(edge .. "LEFT", overlay, edge .. "LEFT")
+        border:SetPoint(edge .. "RIGHT", overlay, edge .. "RIGHT")
+      else
+        border:SetWidth(1)
+        border:SetPoint("TOP" .. edge, overlay, "TOP" .. edge)
+        border:SetPoint("BOTTOM" .. edge, overlay, "BOTTOM" .. edge)
+      end
+    end
+    state.pullHoverOverlay = overlay
+  end
+  if overlay:GetParent() ~= row then
+    overlay:ClearAllPoints()
+    overlay:SetParent(row)
+    overlay:SetAllPoints(row)
+  end
+  local level = row:GetFrameLevel() + 1
+  if overlay:GetFrameLevel() ~= level then overlay:SetFrameLevel(level) end
+  overlay:Show()
+end
+
 local function onUpdate(_, elapsed)
   if not state.enabled then
     return
   end
+
+  refreshPullHover()
 
   state.elapsed = state.elapsed + elapsed
   if state.elapsed < UPDATE_INTERVAL_SECONDS then
@@ -1207,8 +1295,10 @@ local function onUpdate(_, elapsed)
   end
   installEnemyInfoHook()
   installSpellSearchUI()
+  if addon.Compact then addon.Compact.Update(mdt, state.spellSearchUI) end
   local mapActive = not mdt.IsMapSectionActive or mdt:IsMapSectionActive()
-  if state.spellSearchUI then state.spellSearchUI.container:SetShown(mapActive) end
+  local compact = addon.Compact and addon.Compact.IsActive()
+  if state.spellSearchUI then state.spellSearchUI.container:SetShown(mapActive and not compact) end
   if not mapActive then
     hideSpellSearchResults()
     hideAllLabels()
@@ -1256,6 +1346,8 @@ SlashCmdList.MDTQOL = function(message)
   if command == "debug" then
     state.debug = not state.debug
     report("Debug " .. (state.debug and "on" or "off") .. ".")
+  elseif command == "compact" then
+    if addon.Compact then addon.Compact.Toggle() end
   elseif command == "refresh" then
     state.spellSearchIndexByDungeon = {}
     state.pendingSpells = {}
@@ -1271,7 +1363,8 @@ SlashCmdList.MDTQOL = function(message)
     report(string.format("QoL %s; WoW %s (%s), interface %s; MDT %s",
       metadata and metadata(addonName, "Version") or "?", tostring(version), tostring(build), tostring(interface),
       metadata and metadata("MythicDungeonTools", "Version") or "?"))
-    report("Connection: " .. state.connection)
+    report("Connection: " .. state.connection .. "; compact: "
+      .. (addon.Compact and addon.Compact.Status() or "not loaded"))
     local index = mdt and getSpellSearchIndex(mdt)
     report(string.format("Window: %s; search: %s; Ctrl+RightClick: %s; dungeon: %s; spell/enemy entries: %d",
       mdt and mdt.main_frame and "created" or "not created", state.spellSearchUI and "created" or "not created",
@@ -1281,7 +1374,7 @@ SlashCmdList.MDTQOL = function(message)
     report("Enemy Info: " .. state.lastEnemyInfoAction .. "; window: "
       .. (info and (info.frame:IsVisible() and "visible" or "hidden") or "not found"))
   else
-    report("/mdtqol status | debug | refresh")
+    report("/mdtqol status | debug | refresh | compact")
   end
 end
 
