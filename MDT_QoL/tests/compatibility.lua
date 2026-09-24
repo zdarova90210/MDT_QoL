@@ -11,9 +11,15 @@ function methods:SetParent(parent) self.parent = parent end
 function methods:EnableMouse(enabled) self.mouseEnabled = enabled end
 function methods:IsShown() return self.shown end
 function methods:IsVisible() return self.shown and (not self.parent or self.parent:IsVisible()) end
-function methods:Show() self.shown = true end
-function methods:Hide() self.shown = false end
-function methods:SetShown(shown) self.shown = shown end
+function methods:Show()
+  local changed=not self.shown; self.shown=true
+  if changed and self.scripts.OnShow then self.scripts.OnShow(self) end
+end
+function methods:Hide()
+  local changed=self.shown; self.shown=false
+  if changed and self.scripts.OnHide then self.scripts.OnHide(self) end
+end
+function methods:SetShown(shown) if shown then self:Show() else self:Hide() end end
 function methods:SetPoint(...) self.point = {...} end
 function methods:GetPoint() return unpack(self.point or {}) end
 function methods:SetFrameLevel(level) self.level = level end
@@ -29,11 +35,30 @@ function methods:SetText(text)
 end
 function methods:GetText() return self.text end
 function methods:SetFont(_, size) self.fontSize=size; return true end
+function methods:SetSize(width,height) self.width,self.height=width,height end
+function methods:SetWidth(width) self.width=width end
+function methods:SetHeight(height) self.height=height end
+function methods:GetWidth() return self.width or (self.parent and self.parent:GetWidth()) or 900 end
+function methods:GetHeight() return self.height or (self.parent and self.parent:GetHeight()) or 600 end
+function methods:SetTexture(texture) self.texture=texture end
+function methods:GetTexture() return self.texture end
+function methods:GetStringHeight()
+  local width=math.max(1,self.width or 300)
+  return math.max(12,math.ceil(#(self.text or "")/math.max(1,math.floor(width/7)))*12)
+end
+function methods:SetScrollChild(child) self.scrollChild=child end
+function methods:SetVerticalScroll(value) self.verticalScroll=value end
+function methods:SetClipsChildren(value) self.clipsChildren=value end
+function methods:HookScript(event, callback)
+  local original=self.scripts[event]
+  if original then self.scripts[event]=function(...) original(...); callback(...) end
+  else self.scripts[event]=callback end
+end
 function methods:CreateTexture() return CreateFrame("Texture", nil, self) end
 function methods:CreateFontString() return CreateFrame("FontString", nil, self) end
-for _, name in ipairs({ "SetSize", "SetWidth", "SetHeight", "SetFrameStrata", "SetAllPoints", "SetColorTexture",
+for _, name in ipairs({ "SetFrameStrata", "SetAllPoints", "SetColorTexture",
   "SetAutoFocus", "SetTextInsets", "ClearFocus", "SetJustifyH", "SetJustifyV", "RegisterForClicks", "SetWordWrap",
-  "SetTextColor", "SetShadowColor", "SetShadowOffset", "ClearAllPoints", "SetTexture", "SetVertexColor",
+  "SetTextColor", "SetShadowColor", "SetShadowOffset", "ClearAllPoints", "SetVertexColor",
   "SetTexCoord", "SetFontObject" }) do methods[name] = function() end end
 function CreateFrame(kind, name, parent)
   local f = setmetatable({kind=kind, name=name, parent=parent, children={}, scripts={}, events={}, shown=true}, {__index=methods})
@@ -59,10 +84,32 @@ SlashCmdList = {}
 C_Timer = {After = function(_, fn) timers[#timers+1] = fn end}
 C_AddOns = {GetAddOnMetadata = function(name) return name == "MDT_QoL" and "0.6.0" or "6.2.16" end}
 local spellNames = {[101]="Fire Bolt", [102]="Frost Blast", [104]="Shadow Burst"}
+spellNames[201],spellNames[202],spellNames[203]="Fel Bolts","Fel Bolts","Arcane Sweep"
+local spellDescriptions={[201]="Hurls a volley of fel energy at the target.",
+  [202]="Begins a dangerous fel cast that can be interrupted.",
+  [203]="Sweeps the area with arcane energy."}
 C_Spell = {
   GetSpellName = function(id) return spellNames[id] end,
+  GetSpellDescription = function(id) return spellDescriptions[id] end,
+  GetSpellTexture = function(id) return "icon-"..id end,
+  IsSpellDataCached = function(id) return spellNames[id] ~= nil end,
   RequestLoadSpellData = function(id) requested[id] = true end,
 }
+function CreateAtlasMarkup(atlas) return "["..atlas.."]" end
+GameTooltip={lines={},shown=false}
+function GameTooltip:SetOwner(owner,anchor) self.owner,self.anchor=owner,anchor end
+function GameTooltip:GetOwner() return self.owner end
+function GameTooltip:IsOwned(owner) return self.owner==owner end
+function GameTooltip:ClearLines() self.lines={} end
+function GameTooltip:AddLine(value) self.lines[#self.lines+1]=value end
+function GameTooltip:SetSpellByID(spellId)
+  self:ClearLines()
+  self.spellId=spellId
+  self:AddLine(spellNames[spellId])
+  self:AddLine(spellDescriptions[spellId])
+end
+function GameTooltip:Show() self.shown=true end
+function GameTooltip:Hide() self.shown=false; self.owner=nil end
 local db = {currentDungeonIdx=1, currentPreset={[1]=1,[2]=1}, currentSection="maps", presets={
   [1]={{value={currentSublevel=1,pulls={{[1]={1}}}}}},
   [2]={{value={currentSublevel=1,pulls={}}}},
@@ -72,6 +119,8 @@ local source = assert(io.open("MDT_QoL.lua", "rb")):read("*a")
 local addon = {}
 local compactSource = assert(io.open("MDT_QoL_Compact.lua", "rb")):read("*a")
 assert(loadstring(compactSource, "@MDT_QoL_Compact.lua"))("MDT_QoL", addon)
+local readerSource = assert(io.open("MDT_QoL_EnemyInfo.lua", "rb")):read("*a")
+assert(loadstring(readerSource, "@MDT_QoL_EnemyInfo.lua"))("MDT_QoL", addon)
 assert(loadstring(source, "@MDT_QoL.lua"))("MDT_QoL", addon)
 local controller = frames[1]
 local function event(name, ...)
@@ -109,7 +158,17 @@ local function showInfo(enemyIdx)
   lastEnemy=enemyIdx
   if not infoWidget then
     local f=CreateFrame("Frame",nil,MDTFrame)
-    infoWidget={type="Frame",frame=f,enemyDropDown={},enemyDataContainer={},tabGroup={},model={},
+    f:SetSize(1200,800)
+    local tabFrame=CreateFrame("Frame",nil,f); tabFrame:SetSize(1200,740)
+    local middle=CreateFrame("Frame",nil,tabFrame); middle:SetSize(400,740)
+    local right=CreateFrame("Frame",nil,tabFrame); right:SetSize(400,740)
+    local function spell(id,interruptible)
+      return {spellId=id,interruptible=interruptible,title={GetText=function() return spellNames[id] end},
+        icon={GetTexture=function() return "icon-"..id end}}
+    end
+    infoWidget={type="Frame",frame=f,enemyDropDown={},enemyDataContainer={},tabGroup={frame=tabFrame},model={},
+      midContainer={frame=middle},rightContainer={frame=right},
+      spellScroll={children={spell(201,false),spell(203,false),spell(202,true)}},
       Hide=function(self) self.frame:Hide() end}
     f.obj=infoWidget
   end
@@ -186,6 +245,11 @@ assert(#rows()==1 and rows()[1].entry.enemyIdx==2, "search spell ID")
 rows()[1].scripts.OnClick(rows()[1])
 assert(menuCalls==1 and lastEnemy==2, "result opens existing native enemy menu")
 assert(infoCalls==1 and not menuOpen, "search goes directly to Enemy Info")
+tick()
+for _,candidate in ipairs(frames) do
+  assert(not (candidate.mdtQolEnemyInfoReader and candidate:IsVisible()),
+    "search/native Enemy Info opening must preserve the standard layout")
+end
 db.devMode=true
 rows()[1].scripts.OnClick(rows()[1])
 assert(menuCalls==1, "must never run destructive dev-mode right click")
@@ -266,12 +330,76 @@ control=true
 local before=infoCalls
 late:OnClick("RightButton")
 assert(infoCalls==before+1 and infoWidget.frame:IsVisible() and not menuOpen)
+local readerPanel,readerCards,variantButtons
+readerCards,variantButtons={},{}
+for _,candidate in ipairs(frames) do
+  if candidate.mdtQolEnemyInfoReader then readerPanel=candidate end
+  if candidate.mdtQolEnemyInfoCard and candidate:IsShown() then readerCards[#readerCards+1]=candidate end
+  if candidate.mdtQolEnemyInfoVariant and candidate:IsShown() then variantButtons[#variantButtons+1]=candidate end
+end
+assert(readerPanel and readerPanel:IsVisible(), "Ctrl+RightClick opens the ability reader")
+assert(#readerCards==2 and readerCards[1].spellId==201 and readerCards[2].spellId==203,
+  "merge exact same-name spells at their first MDT position without delaying unique abilities")
+assert(#readerCards[1].variants==2
+  and readerCards[1].variants[1].spellId==201 and readerCards[1].variants[2].spellId==202,
+  "preserve every grouped spell variant in original MDT order")
+assert(readerCards[1].title:GetText()=="Fel Bolts ×2"
+  and readerCards[1].description:GetText()==spellDescriptions[201]
+  and readerCards[2].description:GetText()==spellDescriptions[203],
+  "render one grouped card plus ordinary localized ability cards")
+assert(#variantButtons==2 and variantButtons[1].variant.spellId==201
+  and variantButtons[2].variant.spellId==202,
+  "show a numbered icon for every grouped variant")
+variantButtons[2].scripts.OnEnter(variantButtons[2])
+assert(GameTooltip.shown and GameTooltip.owner==variantButtons[2]
+  and GameTooltip.lines[1]=="Fel Bolts" and GameTooltip.lines[2]=="#202"
+  and GameTooltip.lines[#GameTooltip.lines]==spellDescriptions[202],
+  "variant hover shows its own name, ID, status and description in a tooltip")
+variantButtons[2].scripts.OnLeave(variantButtons[2])
+assert(not GameTooltip.shown, "variant tooltip closes when the pointer leaves its icon")
+assert(not requested[201] and not requested[202] and not requested[203],
+  "reader relies on spell data already requested by MDT")
+spellDescriptions[201]="Updated localized spell text."
+event("SPELL_TEXT_UPDATE")
+tick()
+assert(readerCards[1].description:GetText()==spellDescriptions[201],
+  "refresh descriptions when the client updates spell text")
+variantButtons[1].scripts.OnEnter(variantButtons[1])
+assert(GameTooltip.lines[#GameTooltip.lines]==spellDescriptions[201],
+  "variant tooltip uses refreshed client text without rebuilding the grid")
+variantButtons[1].scripts.OnLeave(variantButtons[1])
+assert(readerCards[2].point[4] > 0, "wide Enemy Info keeps unique abilities in the second column")
+infoWidget.frame:SetWidth(600)
+readerPanel.scripts.OnSizeChanged(readerPanel)
+addon.EnemyInfoReader.Update(infoWidget)
+assert(readerCards[2].point[4]==0 and readerCards[2].point[5] < 0,
+  "narrow Enemy Info switches the next unique ability to a new row")
+infoWidget.frame:SetWidth(1200)
 hovered=infoWidget.frame
 event("GLOBAL_MOUSE_UP", "RightButton") -- release of opening click cannot close it
 assert(infoWidget.frame:IsShown())
+variantButtons[1].scripts.OnEnter(variantButtons[1])
+assert(GameTooltip.shown, "reader tooltip is visible before closing Enemy Info")
 -- Both mouse events may arrive without any intervening OnUpdate/pressed sample.
 event("GLOBAL_MOUSE_DOWN", "RightButton")
 assert(not infoWidget.frame:IsShown(), "Ctrl+right mouse down closes Enemy Info")
+assert(not readerPanel:IsShown(), "closing Enemy Info resets and hides the reader")
+assert(not GameTooltip.shown, "closing Enemy Info hides a tooltip owned by the reader")
+local unrelatedTooltipOwner=CreateFrame("Frame",nil,MDTFrame)
+GameTooltip:SetOwner(unrelatedTooltipOwner,"ANCHOR_RIGHT")
+GameTooltip:Show()
+addon.EnemyInfoReader.Closed()
+assert(GameTooltip.shown and GameTooltip.owner==unrelatedTooltipOwner,
+  "reader cleanup never hides unrelated game tooltips")
+GameTooltip:Hide()
+local readerFrameCount=#frames
+for _=1,100 do
+  infoWidget.frame:Show()
+  addon.EnemyInfoReader.OpenedByShortcut(infoWidget)
+  addon.EnemyInfoReader.Update(infoWidget)
+  infoWidget.frame:Hide()
+end
+assert(#frames==readerFrameCount, "repeated reader sessions reuse frames")
 for _=1,10 do tick() end -- holding the closing mouse button must not defeat suppression
 late:OnClick("RightButton")
 assert(infoCalls==before+1, "closing click must not reopen the map pin underneath")

@@ -377,7 +377,7 @@ local function installMenuHook()
   return true
 end
 
-local function openNativeEnemyInfo(blip, originalOnClick)
+local function openNativeEnemyInfo(blip, originalOnClick, showReader)
   local mdt = getMDT()
   local db = mdt and mdt:GetDB()
   if not mdt or (db and db.devMode) or state.menuRequest then return false end
@@ -415,7 +415,10 @@ local function openNativeEnemyInfo(blip, originalOnClick)
       end
       if picked then
         state.lastEnemyInfoAction = "opened through native menu"
-        getEnemyInfoWidget()
+        local enemyInfo = getEnemyInfoWidget()
+        if showReader and addon.EnemyInfoReader then
+          addon.EnemyInfoReader.OpenedByShortcut(enemyInfo)
+        end
         return true
       end
     end
@@ -445,7 +448,7 @@ local function openEnemyInfoForEnemyIdx(enemyIdx, dungeonIdx, sublevel)
     refreshVisibleMapData()
     for _, blip in ipairs(state.visibleBlips) do
       if blip.enemyIdx == enemyIdx and type(blip.OnClick) == "function" then
-        openNativeEnemyInfo(blip, state.originalEnemyClicks[blip.OnClick] or blip.OnClick)
+        openNativeEnemyInfo(blip, state.originalEnemyClicks[blip.OnClick] or blip.OnClick, false)
         return
       end
     end
@@ -691,6 +694,7 @@ local function handleEnemyInfoMouseEvent(event, button)
   local enemyInfoFrame = getEnemyInfoWidget()
   local window = enemyInfoFrame and enemyInfoFrame.frame
   if window and window:IsVisible() and isMouseInsideEnemyInfo(window) then
+    if addon.EnemyInfoReader then addon.EnemyInfoReader.Closed() end
     enemyInfoFrame:Hide()
     state.closingEnemyInfoClick = true
     state.suppressEnemyClickUntil = GetTime() + 0.2
@@ -709,10 +713,13 @@ local function wrapEnemyClick(originalOnClick)
       if state.closingEnemyInfoClick or GetTime() < state.suppressEnemyClickUntil then return end
       local db = mdt.GetDB and mdt:GetDB()
       if not (db and db.devMode) and mdt.visibleMapOnly then
-        if openNativeEnemyInfo(self, originalOnClick) then return end
+        if openNativeEnemyInfo(self, originalOnClick, true) then return end
       end
       if not (db and db.devMode) and type(mdt.ShowEnemyInfoFrame) == "function" then
         mdt:ShowEnemyInfoFrame(self)
+        if addon.EnemyInfoReader then
+          addon.EnemyInfoReader.OpenedByShortcut(getEnemyInfoWidget())
+        end
         return
       end
     end
@@ -1290,12 +1297,14 @@ local function onUpdate(_, elapsed)
   refreshVisibleMapData()
   local mainFrame = mdt and mdt.main_frame
   if not mainFrame or not mainFrame:IsShown() then
+    if addon.EnemyInfoReader then addon.EnemyInfoReader.Closed() end
     hideAllLabels()
     return
   end
   installEnemyInfoHook()
   installSpellSearchUI()
   if addon.Compact then addon.Compact.Update(mdt, state.spellSearchUI) end
+  if addon.EnemyInfoReader then addon.EnemyInfoReader.Update(getEnemyInfoWidget()) end
   local mapActive = not mdt.IsMapSectionActive or mdt:IsMapSectionActive()
   local compact = addon.Compact and addon.Compact.IsActive()
   if state.spellSearchUI then state.spellSearchUI.container:SetShown(mapActive and not compact) end
@@ -1315,6 +1324,9 @@ local function onAddonLoaded(_, event, loadedAddonName, success)
     return
   end
   if event == "SPELL_DATA_LOAD_RESULT" then
+    if addon.EnemyInfoReader and success then
+      addon.EnemyInfoReader.SpellDataUpdated(loadedAddonName)
+    end
     if state.pendingSpells[loadedAddonName] then
       state.pendingSpells[loadedAddonName] = false
       if success then
@@ -1322,6 +1334,10 @@ local function onAddonLoaded(_, event, loadedAddonName, success)
         state.spellSearchDirty = true
       end
     end
+    return
+  end
+  if event == "SPELL_TEXT_UPDATE" then
+    if addon.EnemyInfoReader then addon.EnemyInfoReader.SpellDataUpdated() end
     return
   end
   if loadedAddonName == addonName then
@@ -1372,13 +1388,15 @@ SlashCmdList.MDTQOL = function(message)
       tostring(getSpellSearchDungeonIdx(mdt)), index and #index or 0))
     local info = getEnemyInfoWidget()
     report("Enemy Info: " .. state.lastEnemyInfoAction .. "; window: "
-      .. (info and (info.frame:IsVisible() and "visible" or "hidden") or "not found"))
+      .. (info and (info.frame:IsVisible() and "visible" or "hidden") or "not found")
+      .. "; reader: " .. (addon.EnemyInfoReader and addon.EnemyInfoReader.Status() or "not loaded"))
   else
     report("/mdtqol status | debug | refresh | compact")
   end
 end
 
 frame:RegisterEvent("SPELL_DATA_LOAD_RESULT")
+frame:RegisterEvent("SPELL_TEXT_UPDATE")
 frame:RegisterEvent("GLOBAL_MOUSE_DOWN")
 frame:RegisterEvent("GLOBAL_MOUSE_UP")
 frame:SetScript("OnEvent", onAddonLoaded)
